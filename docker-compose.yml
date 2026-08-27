@@ -1,5 +1,6 @@
 services:
   bearich-api:
+    build: .
     image: bearich-api:latest
     container_name: bearich-api
     restart: unless-stopped
