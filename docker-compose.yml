@@ -1,0 +1,26 @@
+services:
+  bearich-api:
+    image: bearich-api:latest
+    container_name: bearich-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4000:4000"
+    environment:
+      DB_HOST: global-mysql
+      DB_PORT: "3306"
+      DB_USER: ${DB_USER:-bearich}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME:-bearich}
+      PORT: "4000"
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET}
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://bearich-outreach.vercel.app}
+      NODE_ENV: production
+      COOKIE_SAMESITE: none
+    networks:
+      - global-network
+
+networks:
+  global-network:
+    external: true
