@@ -44,3 +44,55 @@ CREATE TABLE IF NOT EXISTS activities (
   created_at DATETIME(3) NOT NULL,
   INDEX idx_prospect (prospect_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS apps (
+  id VARCHAR(40) PRIMARY KEY,
+  slug VARCHAR(50) NOT NULL UNIQUE,
+  name VARCHAR(100) NOT NULL,
+  description TEXT,
+  icon VARCHAR(50) NOT NULL DEFAULT '',
+  enabled TINYINT(1) NOT NULL DEFAULT 1,
+  session_secret VARCHAR(128) NOT NULL,
+  created_at DATETIME(3) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS app_credentials (
+  id VARCHAR(40) PRIMARY KEY,
+  app_id VARCHAR(40) NOT NULL,
+  username VARCHAR(100) NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  created_at DATETIME(3) NOT NULL,
+  UNIQUE KEY uq_app_user (app_id, username),
+  INDEX idx_app_id (app_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS transactions (
+  id VARCHAR(40) PRIMARY KEY,
+  type VARCHAR(10) NOT NULL,
+  amount DECIMAL(12,2) NOT NULL,
+  category VARCHAR(100) NOT NULL DEFAULT '',
+  account VARCHAR(50) NOT NULL DEFAULT 'Tunai',
+  description TEXT,
+  txn_date DATE NOT NULL,
+  created_at DATETIME(3) NOT NULL,
+  INDEX idx_type (type),
+  INDEX idx_date (txn_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS cashflow_accounts (
+  id VARCHAR(40) PRIMARY KEY,
+  name VARCHAR(50) NOT NULL UNIQUE,
+  type VARCHAR(20) NOT NULL DEFAULT 'lainnya',
+  created_at DATETIME(3) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS notes (
+  id VARCHAR(40) PRIMARY KEY,
+  title VARCHAR(255) NOT NULL,
+  content TEXT,
+  tags JSON NOT NULL,
+  pinned TINYINT(1) NOT NULL DEFAULT 0,
+  created_at DATETIME(3) NOT NULL,
+  updated_at DATETIME(3) NOT NULL,
+  INDEX idx_pinned (pinned)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

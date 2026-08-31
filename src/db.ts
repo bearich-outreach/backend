@@ -6,13 +6,22 @@ import {
   RowDataPacket,
 } from "mysql2/promise";
 import {
+  AccountBalance,
+  AccountType,
   Activity,
+  App,
+  CashflowAccount,
+  CashflowSummary,
+  Note,
   Prospect,
   ProspectStatus,
   SequenceStep,
   Settings,
+  Transaction,
+  TransactionType,
 } from "./types";
 import { todayISO, uid } from "./store";
+import { hashPassword, randomSecret } from "./auth";
 
 const DEFAULTS = {
   businessName: "Bearich Studio",
@@ -234,6 +243,63 @@ export async function ensureSchema(): Promise<void> {
         INDEX idx_prospect (prospect_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS apps (
+        id VARCHAR(40) PRIMARY KEY,
+        slug VARCHAR(50) NOT NULL UNIQUE,
+        name VARCHAR(100) NOT NULL,
+        description TEXT,
+        icon VARCHAR(50) NOT NULL DEFAULT '',
+        enabled TINYINT(1) NOT NULL DEFAULT 1,
+        session_secret VARCHAR(128) NOT NULL,
+        created_at DATETIME(3) NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS app_credentials (
+        id VARCHAR(40) PRIMARY KEY,
+        app_id VARCHAR(40) NOT NULL,
+        username VARCHAR(100) NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uq_app_user (app_id, username),
+        INDEX idx_app_id (app_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS transactions (
+        id VARCHAR(40) PRIMARY KEY,
+        type VARCHAR(10) NOT NULL,
+        amount DECIMAL(12,2) NOT NULL,
+        category VARCHAR(100) NOT NULL DEFAULT '',
+        account VARCHAR(50) NOT NULL DEFAULT 'Tunai',
+        description TEXT,
+        txn_date DATE NOT NULL,
+        created_at DATETIME(3) NOT NULL,
+        INDEX idx_type (type),
+        INDEX idx_date (txn_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS cashflow_accounts (
+        id VARCHAR(40) PRIMARY KEY,
+        name VARCHAR(50) NOT NULL UNIQUE,
+        type VARCHAR(20) NOT NULL DEFAULT 'lainnya',
+        created_at DATETIME(3) NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS notes (
+        id VARCHAR(40) PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        content TEXT,
+        tags JSON NOT NULL,
+        pinned TINYINT(1) NOT NULL DEFAULT 0,
+        created_at DATETIME(3) NOT NULL,
+        updated_at DATETIME(3) NOT NULL,
+        INDEX idx_pinned (pinned)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
 
     const [existing] = await conn.query<RowDataPacket[]>(
       "SELECT id FROM settings WHERE id = 1"
@@ -243,6 +309,99 @@ export async function ensureSchema(): Promise<void> {
         "INSERT IGNORE INTO settings (id, services, sequence) VALUES (1, ?, ?)",
         [JSON.stringify(DEFAULTS.services), JSON.stringify(DEFAULTS.sequence)]
       );
+    }
+
+    const DEFAULT_APPS: { slug: string; name: string; description: string }[] =
+      [
+        {
+          slug: "outreach",
+          name: "Outreach",
+          description: "Pipeline & otomasi outreach",
+        },
+        {
+          slug: "tasks",
+          name: "Task Management",
+          description: "Kelola tugas harian",
+        },
+        { slug: "notes", name: "Notes", description: "Catatan & dokumentasi" },
+        {
+          slug: "cashflow",
+          name: "Cash Flow",
+          description: "Catat uang masuk & keluar",
+        },
+      ];
+    for (const a of DEFAULT_APPS) {
+      const [rows] = await conn.query<RowDataPacket[]>(
+        "SELECT id FROM apps WHERE slug = ?",
+        [a.slug]
+      );
+      if (rows.length === 0) {
+        await conn.query(
+          `INSERT INTO apps (id, slug, name, description, icon, enabled, session_secret, created_at)
+           VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+          [
+            uid("app_"),
+            a.slug,
+            a.name,
+            a.description,
+            a.slug,
+            randomSecret(),
+            toMysql(todayISO()),
+          ]
+        );
+      }
+    }
+
+    const adminUser = process.env.ADMIN_USERNAME;
+    const adminPass = process.env.ADMIN_PASSWORD;
+    if (adminUser && adminPass) {
+      const [appRows] = await conn.query<RowDataPacket[]>("SELECT id FROM apps");
+      for (const row of appRows) {
+        const appId = String(row.id);
+        const [credRows] = await conn.query<RowDataPacket[]>(
+          "SELECT id FROM app_credentials WHERE app_id = ?",
+          [appId]
+        );
+        if (credRows.length === 0) {
+          await conn.query(
+            `INSERT INTO app_credentials (id, app_id, username, password_hash, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+            [
+              uid("c_"),
+              appId,
+              adminUser,
+              hashPassword(adminPass),
+              toMysql(todayISO()),
+            ]
+          );
+        }
+      }
+    }
+
+    try {
+      await conn.query(
+        "ALTER TABLE transactions ADD COLUMN account VARCHAR(50) NOT NULL DEFAULT 'Tunai' AFTER category"
+      );
+    } catch {
+      // kolom sudah ada (tabel lama) — abaikan
+    }
+
+    const DEFAULT_ACCOUNTS: { name: string; type: AccountType }[] = [
+      { name: "Tunai", type: "tunai" },
+      { name: "E-Wallet", type: "ewallet" },
+      { name: "Rekening", type: "rekening" },
+    ];
+    for (const a of DEFAULT_ACCOUNTS) {
+      const [rows] = await conn.query<RowDataPacket[]>(
+        "SELECT id FROM cashflow_accounts WHERE name = ?",
+        [a.name]
+      );
+      if (rows.length === 0) {
+        await conn.query(
+          "INSERT INTO cashflow_accounts (id, name, type, created_at) VALUES (?, ?, ?, ?)",
+          [uid("acc_"), a.name, a.type, toMysql(todayISO())]
+        );
+      }
     }
   } finally {
     conn.release();
@@ -486,18 +645,597 @@ export async function getMetrics(now = new Date()) {
     const replied =
       (byStatus.replied ?? 0) + (byStatus.interested ?? 0) + closed;
 
+return {
+        total,
+        byStatus,
+        replied,
+        interested,
+        closed,
+        dead: byStatus.dead ?? 0,
+        due: Number(dueRow[0]?.due ?? 0),
+        replyRate: total > 0 ? Math.round((replied / total) * 100) : 0,
+        closeRate: total > 0 ? Math.round((closed / total) * 100) : 0,
+        revenue: Number(revRow[0]?.revenue ?? 0),
+      };
+    } finally {
+    conn.release();
+  }
+}
+
+interface AppRow extends RowDataPacket {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  icon: string;
+  enabled: number;
+  created_at: string;
+}
+
+function rowToApp(row: AppRow): App {
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    description: row.description ?? undefined,
+    icon: row.icon,
+    enabled: Boolean(row.enabled),
+    createdAt: fromMysql(row.created_at) ?? todayISO(),
+  };
+}
+
+export async function getApps(): Promise<App[]> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<AppRow[]>(
+      "SELECT * FROM apps WHERE enabled = 1 ORDER BY created_at ASC"
+    );
+    return rows.map(rowToApp);
+  } finally {
+    conn.release();
+  }
+}
+
+export async function getAppBySlug(slug: string): Promise<App | undefined> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<AppRow[]>(
+      "SELECT * FROM apps WHERE slug = ?",
+      [slug]
+    );
+    return rows.length ? rowToApp(rows[0]) : undefined;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function getAppSessionSecret(
+  slug: string
+): Promise<string | undefined> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<RowDataPacket[]>(
+      "SELECT session_secret FROM apps WHERE slug = ?",
+      [slug]
+    );
+    return rows.length ? String(rows[0].session_secret) : undefined;
+  } finally {
+    conn.release();
+  }
+}
+
+interface AppCredentialRow extends RowDataPacket {
+  id: string;
+  app_id: string;
+  username: string;
+  password_hash: string;
+}
+
+export async function getAppCredentials(
+  appId: string,
+  username: string
+): Promise<{ passwordHash: string } | undefined> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<AppCredentialRow[]>(
+      "SELECT * FROM app_credentials WHERE app_id = ? AND username = ?",
+      [appId, username]
+    );
+    return rows.length ? { passwordHash: rows[0].password_hash } : undefined;
+  } finally {
+    conn.release();
+  }
+}
+
+/* ---------- Cash Flow ---------- */
+
+interface TransactionRow extends RowDataPacket {
+  id: string;
+  type: TransactionType;
+  amount: string | number;
+  category: string;
+  account: string;
+  description: string | null;
+  txn_date: string;
+  created_at: string;
+}
+
+function rowToTransaction(row: TransactionRow): Transaction {
+  return {
+    id: row.id,
+    type: row.type,
+    amount: Number(row.amount),
+    category: row.category,
+    account: row.account ?? "Tunai",
+    description: row.description ?? undefined,
+    date: String(row.txn_date),
+    createdAt: fromMysql(row.created_at) ?? todayISO(),
+  };
+}
+
+function txnDateToSql(date?: string): string | null {
+  if (!date) return null;
+  const m = String(date).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
+
+function monthRange(
+  month: string
+): { start: string; end: string } | null {
+  const m = String(month).match(/^(\d{4})-(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  if (mo < 1 || mo > 12) return null;
+  const ny = mo === 12 ? y + 1 : y;
+  const nm = mo === 12 ? 1 : mo + 1;
+  return {
+    start: `${m[1]}-${m[2]}-01`,
+    end: `${ny}-${String(nm).padStart(2, "0")}-01`,
+  };
+}
+
+export async function getTransactions(opts: {
+  month?: string;
+  type?: string;
+  category?: string;
+  account?: string;
+} = {}): Promise<Transaction[]> {
+  const conn = await getConn();
+  try {
+    const where: string[] = [];
+    const params: (string | number)[] = [];
+    if (opts.month) {
+      const range = monthRange(opts.month);
+      if (range) {
+        where.push("txn_date >= ? AND txn_date < ?");
+        params.push(range.start, range.end);
+      }
+    }
+    if (opts.type === "in" || opts.type === "out") {
+      where.push("type = ?");
+      params.push(opts.type);
+    }
+    if (opts.category) {
+      where.push("category = ?");
+      params.push(opts.category);
+    }
+    if (opts.account) {
+      where.push("account = ?");
+      params.push(opts.account);
+    }
+    const sql =
+      "SELECT * FROM transactions" +
+      (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
+      " ORDER BY txn_date DESC, created_at DESC";
+    const [rows] = await conn.query<TransactionRow[]>(sql, params);
+    return rows.map(rowToTransaction);
+  } finally {
+    conn.release();
+  }
+}
+
+export async function getTransaction(
+  id: string
+): Promise<Transaction | undefined> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<TransactionRow[]>(
+      "SELECT * FROM transactions WHERE id = ?",
+      [id]
+    );
+    return rows.length ? rowToTransaction(rows[0]) : undefined;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function insertTransaction(t: Transaction): Promise<Transaction> {
+  const conn = await getConn();
+  try {
+    await conn.query(
+      `INSERT INTO transactions (id, type, amount, category, account, description, txn_date, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        t.id,
+        t.type,
+        t.amount,
+        t.category,
+        t.account ?? "Tunai",
+        t.description ?? "",
+        txnDateToSql(t.date) ?? toMysql(todayISO()),
+        toMysql(t.createdAt),
+      ]
+    );
+    return t;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function updateTransaction(
+  id: string,
+  patch: Partial<Transaction>
+): Promise<Transaction | undefined> {
+  const conn = await getConn();
+  try {
+    const current = await getTransaction(id);
+    if (!current) return undefined;
+    const merged = { ...current, ...patch };
+    await conn.query(
+      `UPDATE transactions SET
+        type = ?, amount = ?, category = ?, account = ?, description = ?, txn_date = ?
+       WHERE id = ?`,
+      [
+        merged.type,
+        merged.amount,
+        merged.category,
+        merged.account ?? "Tunai",
+        merged.description ?? "",
+        txnDateToSql(merged.date) ?? toMysql(todayISO()),
+        id,
+      ]
+    );
+    return merged;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function deleteTransaction(id: string): Promise<boolean> {
+  const conn = await getConn();
+  try {
+    const [res] = await conn.query<ResultSetHeader>(
+      "DELETE FROM transactions WHERE id = ?",
+      [id]
+    );
+    return res.affectedRows > 0;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function getCashflowSummary(
+  opts: { month?: string } = {}
+): Promise<CashflowSummary> {
+  const conn = await getConn();
+  try {
+    const where: string[] = [];
+    const params: (string | number)[] = [];
+    if (opts.month) {
+      const range = monthRange(opts.month);
+      if (range) {
+        where.push("txn_date >= ? AND txn_date < ?");
+        params.push(range.start, range.end);
+      }
+    }
+    const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
+
+    const [sumRows] = await conn.query<RowDataPacket[]>(
+      `SELECT
+         COALESCE(SUM(CASE WHEN type = 'in' THEN amount ELSE 0 END), 0) AS total_in,
+         COALESCE(SUM(CASE WHEN type = 'out' THEN amount ELSE 0 END), 0) AS total_out,
+         COALESCE(SUM(CASE WHEN type = 'in' THEN 1 ELSE 0 END), 0) AS count_in,
+         COALESCE(SUM(CASE WHEN type = 'out' THEN 1 ELSE 0 END), 0) AS count_out
+       FROM transactions${whereSql}`,
+      params
+    );
+    const r = sumRows[0] ?? {};
+    const totalIn = Number(r.total_in ?? 0);
+    const totalOut = Number(r.total_out ?? 0);
+
+    const [catRows] = await conn.query<RowDataPacket[]>(
+      `SELECT category, COALESCE(SUM(amount), 0) AS amount
+       FROM transactions${whereSql}
+       GROUP BY category ORDER BY amount DESC`,
+      params
+    );
+    const byCategory: Record<string, number> = {};
+    catRows.forEach((row) => {
+      byCategory[String(row.category)] = Number(row.amount);
+    });
+
+    const [accRows] = await conn.query<RowDataPacket[]>(
+      `SELECT account,
+              COALESCE(SUM(CASE WHEN type = 'in' THEN amount ELSE -amount END), 0) AS balance
+       FROM transactions${whereSql}
+       GROUP BY account ORDER BY balance DESC`,
+      params
+    );
+    const perAccount: AccountBalance[] = accRows.map((row) => ({
+      account: String(row.account),
+      balance: Number(row.balance),
+    }));
+
     return {
-      total,
-      byStatus,
-      replied,
-      interested,
-      closed,
-      dead: byStatus.dead ?? 0,
-      due: Number(dueRow[0]?.due ?? 0),
-      replyRate: total > 0 ? Math.round((replied / total) * 100) : 0,
-      closeRate: total > 0 ? Math.round((closed / total) * 100) : 0,
-      revenue: Number(revRow[0]?.revenue ?? 0),
+      totalIn,
+      totalOut,
+      balance: totalIn - totalOut,
+      countIn: Number(r.count_in ?? 0),
+      countOut: Number(r.count_out ?? 0),
+      byCategory,
+      perAccount,
     };
+  } finally {
+    conn.release();
+  }
+}
+
+/* ---------- Cash Flow: Akun ---------- */
+
+interface AccountRow extends RowDataPacket {
+  id: string;
+  name: string;
+  type: AccountType;
+  created_at: string;
+}
+
+function rowToAccount(row: AccountRow): CashflowAccount {
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    createdAt: fromMysql(row.created_at) ?? todayISO(),
+  };
+}
+
+export async function getAccounts(): Promise<CashflowAccount[]> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<AccountRow[]>(
+      "SELECT * FROM cashflow_accounts ORDER BY created_at ASC"
+    );
+    return rows.map(rowToAccount);
+  } finally {
+    conn.release();
+  }
+}
+
+export async function getAccount(id: string): Promise<CashflowAccount | undefined> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<AccountRow[]>(
+      "SELECT * FROM cashflow_accounts WHERE id = ?",
+      [id]
+    );
+    return rows.length ? rowToAccount(rows[0]) : undefined;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function insertAccount(a: CashflowAccount): Promise<CashflowAccount> {
+  const conn = await getConn();
+  try {
+    await conn.query(
+      "INSERT INTO cashflow_accounts (id, name, type, created_at) VALUES (?, ?, ?, ?)",
+      [a.id, a.name, a.type, toMysql(a.createdAt)]
+    );
+    return a;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function updateAccount(
+  id: string,
+  patch: Partial<CashflowAccount>
+): Promise<CashflowAccount | undefined> {
+  const conn = await getConn();
+  try {
+    const current = await getAccount(id);
+    if (!current) return undefined;
+    const merged = { ...current, ...patch };
+    await conn.query(
+      "UPDATE cashflow_accounts SET name = ?, type = ? WHERE id = ?",
+      [merged.name, merged.type, id]
+    );
+    if (patch.name && patch.name !== current.name) {
+      await conn.query("UPDATE transactions SET account = ? WHERE account = ?", [
+        patch.name,
+        current.name,
+      ]);
+    }
+    return merged;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function deleteAccount(
+  id: string
+): Promise<{ removed: boolean; inUse: boolean }> {
+  const conn = await getConn();
+  try {
+    const account = await getAccount(id);
+    if (!account) return { removed: false, inUse: false };
+    const [used] = await conn.query<RowDataPacket[]>(
+      "SELECT COUNT(*) AS cnt FROM transactions WHERE account = ?",
+      [account.name]
+    );
+    if (Number(used[0]?.cnt ?? 0) > 0) return { removed: false, inUse: true };
+    const [res] = await conn.query<ResultSetHeader>(
+      "DELETE FROM cashflow_accounts WHERE id = ?",
+      [id]
+    );
+    return { removed: res.affectedRows > 0, inUse: false };
+  } finally {
+    conn.release();
+  }
+}
+
+export async function createTransfer(opts: {
+  from: string;
+  to: string;
+  amount: number;
+  date?: string;
+}): Promise<{ fromTxn: Transaction; toTxn: Transaction }> {
+  const now = todayISO();
+  const date = opts.date ?? now.slice(0, 10);
+  const fromTxn: Transaction = {
+    id: uid("t_"),
+    type: "out",
+    amount: opts.amount,
+    category: "Transfer",
+    account: opts.from,
+    description: `Transfer ke ${opts.to}`,
+    date,
+    createdAt: now,
+  };
+  const toTxn: Transaction = {
+    id: uid("t_"),
+    type: "in",
+    amount: opts.amount,
+    category: "Transfer",
+    account: opts.to,
+    description: `Transfer dari ${opts.from}`,
+    date,
+    createdAt: now,
+  };
+  await insertTransaction(fromTxn);
+  await insertTransaction(toTxn);
+  return { fromTxn, toTxn };
+}
+
+/* ---------- Notes ---------- */
+
+interface NoteRow extends RowDataPacket {
+  id: string;
+  title: string;
+  content: string | null;
+  tags: string | unknown;
+  pinned: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToNote(row: NoteRow): Note {
+  return {
+    id: row.id,
+    title: row.title,
+    content: row.content ?? "",
+    tags: parseJson<string[]>(row.tags, []),
+    pinned: Boolean(row.pinned),
+    createdAt: fromMysql(row.created_at) ?? todayISO(),
+    updatedAt: fromMysql(row.updated_at) ?? todayISO(),
+  };
+}
+
+export async function getNotes(opts: { search?: string; tag?: string } = {}): Promise<Note[]> {
+  const conn = await getConn();
+  try {
+    const where: string[] = [];
+    const params: string[] = [];
+    if (opts.search) {
+      where.push("(title LIKE ? OR content LIKE ?)");
+      const like = `%${opts.search}%`;
+      params.push(like, like);
+    }
+    if (opts.tag) {
+      where.push("JSON_CONTAINS(tags, ?)");
+      params.push(JSON.stringify(opts.tag));
+    }
+    const sql =
+      "SELECT * FROM notes" +
+      (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
+      " ORDER BY pinned DESC, updated_at DESC";
+    const [rows] = await conn.query<NoteRow[]>(sql, params);
+    return rows.map(rowToNote);
+  } finally {
+    conn.release();
+  }
+}
+
+export async function getNote(id: string): Promise<Note | undefined> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<NoteRow[]>("SELECT * FROM notes WHERE id = ?", [id]);
+    return rows.length ? rowToNote(rows[0]) : undefined;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function insertNote(n: Note): Promise<Note> {
+  const conn = await getConn();
+  try {
+    await conn.query(
+      `INSERT INTO notes (id, title, content, tags, pinned, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [n.id, n.title, n.content, JSON.stringify(n.tags), n.pinned ? 1 : 0, toMysql(n.createdAt), toMysql(n.updatedAt)]
+    );
+    return n;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function updateNote(
+  id: string,
+  patch: Partial<Note>
+): Promise<Note | undefined> {
+  const conn = await getConn();
+  try {
+    const current = await getNote(id);
+    if (!current) return undefined;
+    const merged = { ...current, ...patch, updatedAt: todayISO() };
+    await conn.query(
+      "UPDATE notes SET title = ?, content = ?, tags = ?, pinned = ?, updated_at = ? WHERE id = ?",
+      [
+        merged.title,
+        merged.content,
+        JSON.stringify(merged.tags),
+        merged.pinned ? 1 : 0,
+        toMysql(merged.updatedAt),
+        id,
+      ]
+    );
+    return merged;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function deleteNote(id: string): Promise<boolean> {
+  const conn = await getConn();
+  try {
+    const [res] = await conn.query<ResultSetHeader>("DELETE FROM notes WHERE id = ?", [id]);
+    return res.affectedRows > 0;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function getNoteTags(): Promise<string[]> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<RowDataPacket[]>("SELECT tags FROM notes");
+    const tags = new Set<string>();
+    rows.forEach((r) => {
+      const arr = parseJson<string[]>(r.tags, []);
+      arr.forEach((t) => tags.add(t));
+    });
+    return Array.from(tags).sort((a, b) => a.localeCompare(b));
   } finally {
     conn.release();
   }

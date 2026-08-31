@@ -1,5 +1,11 @@
-const COOKIE = "bo_session";
-const TTL_SECONDS = 60 * 60 * 24 * 7;
+import { randomBytes, scryptSync, timingSafeEqual } from "crypto";
+
+export const SESSION_COOKIE = "bo_session";
+export const PLATFORM_COOKIE = "bh_platform";
+export const APP_COOKIE_PREFIX = "bh_app_";
+export const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
+
+const TTL_SECONDS = SESSION_TTL_SECONDS;
 
 function bytesToB64url(bytes: Uint8Array): string {
   let bin = "";
@@ -40,27 +46,58 @@ async function hmac(data: string, secret: string): Promise<string> {
   return bytesToB64url(new Uint8Array(sig));
 }
 
-export async function createToken(username: string): Promise<string> {
-  const payload = enc(JSON.stringify({ u: username, exp: Date.now() + TTL_SECONDS * 1000 }));
-  const sig = await hmac(payload, process.env.SESSION_SECRET ?? "");
-  return `${payload}.${sig}`;
+export async function createToken(
+  payload: Record<string, unknown>,
+  secret: string
+): Promise<string> {
+  const data = enc(
+    JSON.stringify({ ...payload, exp: Date.now() + TTL_SECONDS * 1000 })
+  );
+  const sig = await hmac(data, secret);
+  return `${data}.${sig}`;
 }
 
-export async function verifyToken(token: string): Promise<boolean> {
-  const secret = process.env.SESSION_SECRET ?? "";
-  if (!secret) return false;
+export async function verifyToken(
+  token: string,
+  secret: string
+): Promise<Record<string, unknown> | null> {
+  if (!secret) return null;
   const [payload, sig] = token.split(".");
-  if (!payload || !sig) return false;
+  if (!payload || !sig) return null;
   const expected = await hmac(payload, secret);
-  if (expected !== sig) return false;
+  if (expected !== sig) return null;
   try {
-    const data = JSON.parse(dec(payload)) as { u?: string; exp?: number };
-    if (!data.u) return false;
-    if (typeof data.exp === "number" && data.exp < Date.now()) return false;
-    return true;
+    const data = JSON.parse(dec(payload)) as Record<string, unknown>;
+    if (typeof data.exp === "number" && data.exp < Date.now()) return null;
+    return data;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function hashPassword(password: string): string {
+  const salt = randomBytes(16).toString("hex");
+  const hash = scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${hash}`;
+}
+
+export function verifyPassword(password: string, stored: string): boolean {
+  const [salt, hash] = stored.split(":");
+  if (!salt || !hash) return false;
+  const candidate = scryptSync(password, salt, 64);
+  const expected = Buffer.from(hash, "hex");
+  return (
+    candidate.length === expected.length &&
+    timingSafeEqual(candidate, expected)
+  );
+}
+
+export function randomSecret(bytes = 32): string {
+  return randomBytes(bytes).toString("hex");
+}
+
+export function appCookieName(slug: string): string {
+  return `${APP_COOKIE_PREFIX}${slug}`;
 }
 
 export function credentialsConfigured(): boolean {
@@ -78,6 +115,3 @@ export function checkPassword(input: string): boolean {
   for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
   return diff === 0;
 }
-
-export const SESSION_COOKIE = COOKIE;
-export const SESSION_TTL_SECONDS = TTL_SECONDS;
