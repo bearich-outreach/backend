@@ -340,6 +340,11 @@ function parseMonth(value: unknown): string | undefined {
   return /^\d{4}-\d{2}$/.test(m) ? m : undefined;
 }
 
+function parseDate(value: unknown): string | undefined {
+  const d = String(value ?? "");
+  return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : undefined;
+}
+
 async function accountNameExists(name: string): Promise<boolean> {
   const accounts = await getAccounts();
   return accounts.some((a) => a.name === name);
@@ -355,6 +360,7 @@ const VALID_ACCOUNT_TYPES: AccountType[] = [
 cashflow.get("/summary", h(async (req, res) => {
   const summary = await getCashflowSummary({
     month: parseMonth(req.query.month),
+    date: parseDate(req.query.date),
   });
   res.json({ summary });
 }));
@@ -465,6 +471,7 @@ cashflow.post("/transfer", h(async (req, res) => {
 cashflow.get("/transactions", h(async (req, res) => {
   const transactions = await getTransactions({
     month: parseMonth(req.query.month),
+    date: parseDate(req.query.date),
     type: typeof req.query.type === "string" ? req.query.type : undefined,
     category:
       typeof req.query.category === "string" ? req.query.category : undefined,
