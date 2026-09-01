@@ -829,6 +829,8 @@ function monthRange(
 export async function getTransactions(opts: {
   month?: string;
   date?: string;
+  startDate?: string;
+  endDate?: string;
   type?: string;
   category?: string;
   account?: string;
@@ -837,7 +839,20 @@ export async function getTransactions(opts: {
   try {
     const where: string[] = [];
     const params: (string | number)[] = [];
-    if (opts.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date)) {
+    if (opts.startDate || opts.endDate) {
+      const sd = opts.startDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.startDate) ? opts.startDate : null;
+      const ed = opts.endDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.endDate) ? opts.endDate : null;
+      if (sd && ed) {
+        where.push("txn_date >= ? AND txn_date <= ?");
+        params.push(sd, ed);
+      } else if (sd) {
+        where.push("txn_date >= ?");
+        params.push(sd);
+      } else if (ed) {
+        where.push("txn_date <= ?");
+        params.push(ed);
+      }
+    } else if (opts.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date)) {
       where.push("txn_date = ?");
       params.push(opts.date);
     } else if (opts.month) {
@@ -951,13 +966,26 @@ export async function deleteTransaction(id: string): Promise<boolean> {
 }
 
 export async function getCashflowSummary(
-  opts: { month?: string; date?: string } = {}
+  opts: { month?: string; date?: string; startDate?: string; endDate?: string } = {}
 ): Promise<CashflowSummary> {
   const conn = await getConn();
   try {
     const where: string[] = [];
     const params: (string | number)[] = [];
-    if (opts.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date)) {
+    if (opts.startDate || opts.endDate) {
+      const sd = opts.startDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.startDate) ? opts.startDate : null;
+      const ed = opts.endDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.endDate) ? opts.endDate : null;
+      if (sd && ed) {
+        where.push("txn_date >= ? AND txn_date <= ?");
+        params.push(sd, ed);
+      } else if (sd) {
+        where.push("txn_date >= ?");
+        params.push(sd);
+      } else if (ed) {
+        where.push("txn_date <= ?");
+        params.push(ed);
+      }
+    } else if (opts.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date)) {
       where.push("txn_date = ?");
       params.push(opts.date);
     } else if (opts.month) {

@@ -361,6 +361,8 @@ cashflow.get("/summary", h(async (req, res) => {
   const summary = await getCashflowSummary({
     month: parseMonth(req.query.month),
     date: parseDate(req.query.date),
+    startDate: parseDate(req.query.startDate),
+    endDate: parseDate(req.query.endDate),
   });
   res.json({ summary });
 }));
@@ -472,6 +474,8 @@ cashflow.get("/transactions", h(async (req, res) => {
   const transactions = await getTransactions({
     month: parseMonth(req.query.month),
     date: parseDate(req.query.date),
+    startDate: parseDate(req.query.startDate),
+    endDate: parseDate(req.query.endDate),
     type: typeof req.query.type === "string" ? req.query.type : undefined,
     category:
       typeof req.query.category === "string" ? req.query.category : undefined,
