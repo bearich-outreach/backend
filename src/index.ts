@@ -632,6 +632,7 @@ tasks.get("/tasks", h(async (req, res) => {
     status: typeof req.query.status === "string" ? req.query.status : undefined,
     priority: typeof req.query.priority === "string" ? req.query.priority : undefined,
     search: typeof req.query.search === "string" ? req.query.search : undefined,
+    dueDate: typeof req.query.dueDate === "string" ? req.query.dueDate : undefined,
   });
   res.json({ tasks: taskList });
 }));

@@ -1345,6 +1345,7 @@ export async function getTasks(opts: {
   status?: string;
   priority?: string;
   search?: string;
+  dueDate?: string;
 } = {}): Promise<Task[]> {
   const conn = await getConn();
   try {
@@ -1362,6 +1363,10 @@ export async function getTasks(opts: {
       where.push("(title LIKE ? OR description LIKE ?)");
       const like = `%${opts.search}%`;
       params.push(like, like);
+    }
+    if (opts.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.dueDate)) {
+      where.push("due_date = ?");
+      params.push(opts.dueDate);
     }
     const sql =
       "SELECT * FROM tasks" +
