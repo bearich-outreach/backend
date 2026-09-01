@@ -1480,8 +1480,8 @@ export async function getTaskStats(): Promise<TaskStats> {
       [todayDate]
     );
     const [doneTodayRow] = await conn.query<RowDataPacket[]>(
-      "SELECT COUNT(*) AS cnt FROM tasks WHERE status = 'done' AND completed_at >= ?",
-      [todaySql]
+      "SELECT COUNT(*) AS cnt FROM tasks WHERE status = 'done' AND DATE(completed_at) = ?",
+      [todayDate]
     );
 
     return {
