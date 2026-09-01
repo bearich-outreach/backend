@@ -11,6 +11,7 @@ import {
   Activity,
   App,
   CashflowAccount,
+  CashflowSettings,
   CashflowSummary,
   Note,
   Prospect,
@@ -300,6 +301,17 @@ export async function ensureSchema(): Promise<void> {
         INDEX idx_pinned (pinned)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS cashflow_settings (
+        id INT PRIMARY KEY DEFAULT 1,
+        target_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+        target_type VARCHAR(20) NOT NULL DEFAULT 'saving',
+        CHECK (id = 1)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await conn.query(
+      "INSERT IGNORE INTO cashflow_settings (id, target_amount, target_type) VALUES (1, 0, 'saving')"
+    );
 
     const [existing] = await conn.query<RowDataPacket[]>(
       "SELECT id FROM settings WHERE id = 1"
@@ -1115,6 +1127,41 @@ export async function createTransfer(opts: {
   await insertTransaction(fromTxn);
   await insertTransaction(toTxn);
   return { fromTxn, toTxn };
+}
+
+/* ---------- Cash Flow: Settings ---------- */
+
+export async function getCashflowSettings(): Promise<CashflowSettings> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<RowDataPacket[]>(
+      "SELECT target_amount, target_type FROM cashflow_settings WHERE id = 1"
+    );
+    const row = rows[0] ?? {};
+    return {
+      targetAmount: Number(row.target_amount ?? 0),
+      targetType: "saving",
+    };
+  } finally {
+    conn.release();
+  }
+}
+
+export async function saveCashflowSettings(
+  s: CashflowSettings
+): Promise<CashflowSettings> {
+  const conn = await getConn();
+  try {
+    await conn.query(
+      `INSERT INTO cashflow_settings (id, target_amount, target_type)
+       VALUES (1, ?, 'saving')
+       ON DUPLICATE KEY UPDATE target_amount = VALUES(target_amount), target_type = 'saving'`,
+      [s.targetAmount]
+    );
+    return s;
+  } finally {
+    conn.release();
+  }
 }
 
 /* ---------- Notes ---------- */

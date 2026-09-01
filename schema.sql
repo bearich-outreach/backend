@@ -96,3 +96,10 @@ CREATE TABLE IF NOT EXISTS notes (
   updated_at DATETIME(3) NOT NULL,
   INDEX idx_pinned (pinned)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS cashflow_settings (
+  id INT PRIMARY KEY DEFAULT 1,
+  target_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+  target_type VARCHAR(20) NOT NULL DEFAULT 'saving',
+  CHECK (id = 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

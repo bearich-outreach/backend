@@ -20,6 +20,7 @@ import {
   getAccounts,
   getActivities,
   getApps,
+  getCashflowSettings,
   getCashflowSummary,
   getDue,
   getMetrics,
@@ -35,6 +36,7 @@ import {
   insertNote,
   insertProspect,
   insertTransaction,
+  saveCashflowSettings,
   saveSettings,
   updateAccount,
   updateNote,
@@ -44,7 +46,7 @@ import {
 import { advanceProspect, exportCsv, parseCsv, setStatus, logNote } from "./outreach";
 import { generateMessage } from "./ai";
 import { createProspect, todayISO, uid } from "./store";
-import { AccountType, Note, Prospect, ProspectStatus, Settings } from "./types";
+import { AccountType, CashflowSettings, Note, Prospect, ProspectStatus, Settings } from "./types";
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
@@ -349,6 +351,28 @@ cashflow.get("/summary", h(async (req, res) => {
     month: parseMonth(req.query.month),
   });
   res.json({ summary });
+}));
+
+cashflow.get("/settings", h(async (_req, res) => {
+  const [settings, summary] = await Promise.all([
+    getCashflowSettings(),
+    getCashflowSummary({}),
+  ]);
+  res.json({ settings, balance: summary.balance });
+}));
+
+cashflow.post("/settings", h(async (req, res) => {
+  const body = req.body ?? {};
+  const amount = Number(body.targetAmount);
+  if (!Number.isFinite(amount) || amount < 0) {
+    return sendError(res, 400, "targetAmount harus angka >= 0");
+  }
+  const settings: CashflowSettings = {
+    targetAmount: amount,
+    targetType: "saving",
+  };
+  const saved = await saveCashflowSettings(settings);
+  res.json({ settings: saved });
 }));
 
 cashflow.get("/accounts", h(async (_req, res) => {
