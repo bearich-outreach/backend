@@ -840,16 +840,17 @@ export async function getTransactions(opts: {
     const where: string[] = [];
     const params: (string | number)[] = [];
     if (opts.startDate || opts.endDate) {
-      const sd = opts.startDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.startDate) ? opts.startDate : null;
-      const ed = opts.endDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.endDate) ? opts.endDate : null;
+      let sd = opts.startDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.startDate) ? opts.startDate : null;
+      let ed = opts.endDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.endDate) ? opts.endDate : null;
       if (sd && ed) {
+        if (sd > ed) [sd, ed] = [ed, sd];
         where.push("txn_date >= ? AND txn_date <= ?");
         params.push(sd, ed);
       } else if (sd) {
-        where.push("txn_date >= ?");
+        where.push("txn_date = ?");
         params.push(sd);
       } else if (ed) {
-        where.push("txn_date <= ?");
+        where.push("txn_date = ?");
         params.push(ed);
       }
     } else if (opts.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date)) {
@@ -973,16 +974,17 @@ export async function getCashflowSummary(
     const where: string[] = [];
     const params: (string | number)[] = [];
     if (opts.startDate || opts.endDate) {
-      const sd = opts.startDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.startDate) ? opts.startDate : null;
-      const ed = opts.endDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.endDate) ? opts.endDate : null;
+      let sd = opts.startDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.startDate) ? opts.startDate : null;
+      let ed = opts.endDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.endDate) ? opts.endDate : null;
       if (sd && ed) {
+        if (sd > ed) [sd, ed] = [ed, sd];
         where.push("txn_date >= ? AND txn_date <= ?");
         params.push(sd, ed);
       } else if (sd) {
-        where.push("txn_date >= ?");
+        where.push("txn_date = ?");
         params.push(sd);
       } else if (ed) {
-        where.push("txn_date <= ?");
+        where.push("txn_date = ?");
         params.push(ed);
       }
     } else if (opts.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date)) {
