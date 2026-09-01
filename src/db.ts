@@ -18,6 +18,10 @@ import {
   ProspectStatus,
   SequenceStep,
   Settings,
+  Task,
+  TaskPriority,
+  TaskStats,
+  TaskStatus,
   Transaction,
   TransactionType,
 } from "./types";
@@ -312,6 +316,21 @@ export async function ensureSchema(): Promise<void> {
     await conn.query(
       "INSERT IGNORE INTO cashflow_settings (id, target_amount, target_type) VALUES (1, 0, 'saving')"
     );
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS tasks (
+        id VARCHAR(40) PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        status VARCHAR(20) NOT NULL DEFAULT 'todo',
+        priority VARCHAR(10) NOT NULL DEFAULT 'medium',
+        due_date DATE NULL,
+        created_at DATETIME(3) NOT NULL,
+        updated_at DATETIME(3) NOT NULL,
+        completed_at DATETIME(3) NULL,
+        INDEX idx_status (status),
+        INDEX idx_due (due_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
 
     const [existing] = await conn.query<RowDataPacket[]>(
       "SELECT id FROM settings WHERE id = 1"
@@ -1283,6 +1302,192 @@ export async function getNoteTags(): Promise<string[]> {
       arr.forEach((t) => tags.add(t));
     });
     return Array.from(tags).sort((a, b) => a.localeCompare(b));
+  } finally {
+    conn.release();
+  }
+}
+
+/* ---------- Tasks ---------- */
+
+interface TaskRow extends RowDataPacket {
+  id: string;
+  title: string;
+  description: string | null;
+  status: TaskStatus;
+  priority: TaskPriority;
+  due_date: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+function dateToSql(date?: string): string | null {
+  if (!date) return null;
+  const m = String(date).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
+
+function rowToTask(row: TaskRow): Task {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description ?? undefined,
+    status: row.status,
+    priority: row.priority,
+    dueDate: row.due_date ?? undefined,
+    createdAt: fromMysql(row.created_at) ?? todayISO(),
+    updatedAt: fromMysql(row.updated_at) ?? todayISO(),
+    completedAt: row.completed_at ? fromMysql(row.completed_at) : undefined,
+  };
+}
+
+export async function getTasks(opts: {
+  status?: string;
+  priority?: string;
+  search?: string;
+} = {}): Promise<Task[]> {
+  const conn = await getConn();
+  try {
+    const where: string[] = [];
+    const params: string[] = [];
+    if (opts.status === "todo" || opts.status === "in_progress" || opts.status === "done") {
+      where.push("status = ?");
+      params.push(opts.status);
+    }
+    if (opts.priority === "low" || opts.priority === "medium" || opts.priority === "high") {
+      where.push("priority = ?");
+      params.push(opts.priority);
+    }
+    if (opts.search) {
+      where.push("(title LIKE ? OR description LIKE ?)");
+      const like = `%${opts.search}%`;
+      params.push(like, like);
+    }
+    const sql =
+      "SELECT * FROM tasks" +
+      (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
+      " ORDER BY (status = 'done') ASC, due_date IS NULL ASC, due_date ASC, created_at DESC";
+    const [rows] = await conn.query<TaskRow[]>(sql, params);
+    return rows.map(rowToTask);
+  } finally {
+    conn.release();
+  }
+}
+
+export async function getTask(id: string): Promise<Task | undefined> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<TaskRow[]>("SELECT * FROM tasks WHERE id = ?", [id]);
+    return rows.length ? rowToTask(rows[0]) : undefined;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function insertTask(t: Task): Promise<Task> {
+  const conn = await getConn();
+  try {
+    await conn.query(
+      `INSERT INTO tasks (id, title, description, status, priority, due_date, created_at, updated_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        t.id,
+        t.title,
+        t.description ?? "",
+        t.status,
+        t.priority,
+        dateToSql(t.dueDate),
+        toMysql(t.createdAt),
+        toMysql(t.updatedAt),
+        toMysql(t.completedAt),
+      ]
+    );
+    return t;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function updateTask(
+  id: string,
+  patch: Partial<Task>
+): Promise<Task | undefined> {
+  const conn = await getConn();
+  try {
+    const current = await getTask(id);
+    if (!current) return undefined;
+    const merged = { ...current, ...patch, updatedAt: todayISO() };
+    await conn.query(
+      `UPDATE tasks SET
+        title = ?, description = ?, status = ?, priority = ?, due_date = ?, updated_at = ?, completed_at = ?
+       WHERE id = ?`,
+      [
+        merged.title,
+        merged.description ?? "",
+        merged.status,
+        merged.priority,
+        dateToSql(merged.dueDate),
+        toMysql(merged.updatedAt),
+        toMysql(merged.completedAt),
+        id,
+      ]
+    );
+    return merged;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function deleteTask(id: string): Promise<boolean> {
+  const conn = await getConn();
+  try {
+    const [res] = await conn.query<ResultSetHeader>("DELETE FROM tasks WHERE id = ?", [id]);
+    return res.affectedRows > 0;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function getTaskStats(): Promise<TaskStats> {
+  const conn = await getConn();
+  try {
+    const today = new Date();
+    const todaySql = toMysql(today.toISOString()) ?? "";
+    const todayDate = todaySql.slice(0, 10);
+
+    const [byStatus] = await conn.query<RowDataPacket[]>(
+      "SELECT status, COUNT(*) AS cnt FROM tasks GROUP BY status"
+    );
+    const counts: Record<string, number> = {};
+    byStatus.forEach((r) => {
+      counts[String(r.status)] = Number(r.cnt);
+    });
+
+    const [totalRow] = await conn.query<RowDataPacket[]>(
+      "SELECT COUNT(*) AS total FROM tasks"
+    );
+    const [overdueRow] = await conn.query<RowDataPacket[]>(
+      "SELECT COUNT(*) AS cnt FROM tasks WHERE status != 'done' AND due_date IS NOT NULL AND due_date < ?",
+      [todayDate]
+    );
+    const [dueTodayRow] = await conn.query<RowDataPacket[]>(
+      "SELECT COUNT(*) AS cnt FROM tasks WHERE status != 'done' AND due_date = ?",
+      [todayDate]
+    );
+    const [doneTodayRow] = await conn.query<RowDataPacket[]>(
+      "SELECT COUNT(*) AS cnt FROM tasks WHERE status = 'done' AND completed_at >= ?",
+      [todaySql]
+    );
+
+    return {
+      total: Number(totalRow[0]?.total ?? 0),
+      todo: counts.todo ?? 0,
+      inProgress: counts.in_progress ?? 0,
+      done: counts.done ?? 0,
+      overdue: Number(overdueRow[0]?.cnt ?? 0),
+      dueToday: Number(dueTodayRow[0]?.cnt ?? 0),
+      doneToday: Number(doneTodayRow[0]?.cnt ?? 0),
+    };
   } finally {
     conn.release();
   }

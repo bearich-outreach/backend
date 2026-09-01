@@ -103,3 +103,17 @@ CREATE TABLE IF NOT EXISTS cashflow_settings (
   target_type VARCHAR(20) NOT NULL DEFAULT 'saving',
   CHECK (id = 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id VARCHAR(40) PRIMARY KEY,
+  title VARCHAR(255) NOT NULL,
+  description TEXT,
+  status VARCHAR(20) NOT NULL DEFAULT 'todo',
+  priority VARCHAR(10) NOT NULL DEFAULT 'medium',
+  due_date DATE NULL,
+  created_at DATETIME(3) NOT NULL,
+  updated_at DATETIME(3) NOT NULL,
+  completed_at DATETIME(3) NULL,
+  INDEX idx_status (status),
+  INDEX idx_due (due_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

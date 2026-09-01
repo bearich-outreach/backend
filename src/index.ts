@@ -15,6 +15,7 @@ import {
   deleteAccount,
   deleteNote,
   deleteProspect,
+  deleteTask,
   deleteTransaction,
   getAccount,
   getAccounts,
@@ -30,23 +31,28 @@ import {
   getProspect,
   getProspects,
   getSettings,
+  getTask,
+  getTasks,
+  getTaskStats,
   getTransaction,
   getTransactions,
   insertAccount,
   insertNote,
   insertProspect,
+  insertTask,
   insertTransaction,
   saveCashflowSettings,
   saveSettings,
   updateAccount,
   updateNote,
   updateProspect,
+  updateTask,
   updateTransaction,
 } from "./db";
 import { advanceProspect, exportCsv, parseCsv, setStatus, logNote } from "./outreach";
 import { generateMessage } from "./ai";
 import { createProspect, todayISO, uid } from "./store";
-import { AccountType, CashflowSettings, Note, Prospect, ProspectStatus, Settings } from "./types";
+import { AccountType, CashflowSettings, Note, Prospect, ProspectStatus, Settings, Task } from "./types";
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
@@ -607,6 +613,97 @@ notes.delete("/notes/:id", h(async (req, res) => {
 }));
 
 app.use("/api/apps/notes", notes);
+
+/* ---------- Tasks app ---------- */
+
+const tasks = express.Router();
+tasks.use(requirePlatformAuth);
+
+const VALID_TASK_STATUS: Task["status"][] = ["todo", "in_progress", "done"];
+const VALID_TASK_PRIORITY: Task["priority"][] = ["low", "medium", "high"];
+
+tasks.get("/stats", h(async (_req, res) => {
+  const stats = await getTaskStats();
+  res.json({ stats });
+}));
+
+tasks.get("/tasks", h(async (req, res) => {
+  const taskList = await getTasks({
+    status: typeof req.query.status === "string" ? req.query.status : undefined,
+    priority: typeof req.query.priority === "string" ? req.query.priority : undefined,
+    search: typeof req.query.search === "string" ? req.query.search : undefined,
+  });
+  res.json({ tasks: taskList });
+}));
+
+tasks.post("/tasks", h(async (req, res) => {
+  const body = req.body ?? {};
+  const title = String(body.title ?? "").trim();
+  if (!title) return sendError(res, 400, "title wajib diisi");
+  const status = VALID_TASK_STATUS.includes(body.status as Task["status"])
+    ? (body.status as Task["status"])
+    : "todo";
+  const priority = VALID_TASK_PRIORITY.includes(body.priority as Task["priority"])
+    ? (body.priority as Task["priority"])
+    : "medium";
+  const now = todayISO();
+  const due = String(body.dueDate ?? "").slice(0, 10);
+  const task: Task = {
+    id: uid("tsk_"),
+    title,
+    description: body.description !== undefined ? String(body.description) : undefined,
+    status,
+    priority,
+    dueDate: /^\d{4}-\d{2}-\d{2}$/.test(due) ? due : undefined,
+    createdAt: now,
+    updatedAt: now,
+    completedAt: status === "done" ? now : undefined,
+  };
+  await insertTask(task);
+  res.status(201).json({ task });
+}));
+
+tasks.get("/tasks/:id", h(async (req, res) => {
+  const task = await getTask(req.params.id);
+  if (!task) return sendError(res, 404, "not found");
+  res.json({ task });
+}));
+
+tasks.patch("/tasks/:id", h(async (req, res) => {
+  const current = await getTask(req.params.id);
+  if (!current) return sendError(res, 404, "not found");
+  const body = req.body ?? {};
+  const patch: Partial<Task> = {};
+  if (body.title !== undefined) {
+    const title = String(body.title).trim();
+    if (!title) return sendError(res, 400, "title wajib diisi");
+    patch.title = title;
+  }
+  if (body.description !== undefined) patch.description = String(body.description);
+  if (VALID_TASK_STATUS.includes(body.status as Task["status"])) {
+    patch.status = body.status as Task["status"];
+  }
+  if (VALID_TASK_PRIORITY.includes(body.priority as Task["priority"])) {
+    patch.priority = body.priority as Task["priority"];
+  }
+  if (body.dueDate !== undefined) {
+    const due = String(body.dueDate).slice(0, 10);
+    patch.dueDate = /^\d{4}-\d{2}-\d{2}$/.test(due) ? due : undefined;
+  }
+  if (patch.status !== undefined) {
+    patch.completedAt = patch.status === "done" ? todayISO() : undefined;
+  }
+  const updated = await updateTask(req.params.id, patch);
+  res.json({ task: updated });
+}));
+
+tasks.delete("/tasks/:id", h(async (req, res) => {
+  const ok = await deleteTask(req.params.id);
+  if (!ok) return sendError(res, 404, "not found");
+  res.json({ removed: true });
+}));
+
+app.use("/api/apps/tasks", tasks);
 
 app.use("/api", (_req, res) => sendError(res, 404, "not found"));
 
