@@ -203,6 +203,8 @@ export interface QualifiedLead {
   placeId: string;
   name: string;
   company?: string;
+  address?: string;
+  mapsUrl?: string;
   phone628: string;
   city?: string;
   category?: string;

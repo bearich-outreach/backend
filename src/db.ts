@@ -481,12 +481,14 @@ export async function ensureSchema(): Promise<void> {
         place_id VARCHAR(100) NOT NULL,
         name VARCHAR(255) NOT NULL,
         company VARCHAR(255) NOT NULL DEFAULT '',
+        address TEXT NULL,
         phone_628 VARCHAR(20) NOT NULL,
         city VARCHAR(100) NOT NULL DEFAULT '',
         category VARCHAR(100) NOT NULL DEFAULT '',
         rating DECIMAL(2,1) NULL,
         review_count INT NOT NULL DEFAULT 0,
         website VARCHAR(255) DEFAULT '',
+        maps_url VARCHAR(600) NOT NULL DEFAULT '',
         score INT NOT NULL,
         wa_verified TINYINT(1) NOT NULL DEFAULT 0,
         message TEXT,
@@ -530,6 +532,9 @@ export async function ensureSchema(): Promise<void> {
         INDEX idx_retry (next_retry_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+    // Migrasi kolom baru qualified_leads untuk tabel lama di production
+    try { await conn.query("ALTER TABLE qualified_leads ADD COLUMN address TEXT NULL AFTER company"); } catch { /* kolom sudah ada */ }
+    try { await conn.query("ALTER TABLE qualified_leads ADD COLUMN maps_url VARCHAR(600) NOT NULL DEFAULT '' AFTER website"); } catch { /* kolom sudah ada */ }
   } finally {
     conn.release();
   }
@@ -1756,11 +1761,11 @@ export async function countRawLeads() {
 }
 
 interface QualifiedLeadRow extends RowDataPacket {
-  id: string; place_id: string; name: string; company: string; phone_628: string; city: string; category: string; rating: string | null; review_count: number; website: string; score: number; wa_verified: number; message: string | null; message_variants: string | unknown; status: QualifiedLead["status"]; created_at: string; contacted_at: string | null; replied_at: string | null;
+  id: string; place_id: string; name: string; company: string; address: string | null; phone_628: string; city: string; category: string; rating: string | null; review_count: number; website: string; maps_url: string | null; score: number; wa_verified: number; message: string | null; message_variants: string | unknown; status: QualifiedLead["status"]; created_at: string; contacted_at: string | null; replied_at: string | null;
 }
 function rowToQualifiedLead(r: QualifiedLeadRow): QualifiedLead {
   return {
-    id: r.id, placeId: r.place_id, name: r.name, company: r.company ?? undefined, phone628: r.phone_628, city: r.city ?? undefined, category: r.category ?? undefined, rating: r.rating == null ? undefined : Number(r.rating), reviewCount: Number(r.review_count), website: r.website ?? undefined, score: Number(r.score), waVerified: Boolean(r.wa_verified), message: r.message ?? undefined, messageVariants: parseJson<string[] | undefined>(r.message_variants, undefined), status: r.status, createdAt: fromMysql(r.created_at) ?? todayISO(), contactedAt: fromMysql(r.contacted_at ?? undefined), repliedAt: fromMysql(r.replied_at ?? undefined),
+    id: r.id, placeId: r.place_id, name: r.name, company: r.company ?? undefined, address: r.address ?? undefined, phone628: r.phone_628, city: r.city ?? undefined, category: r.category ?? undefined, rating: r.rating == null ? undefined : Number(r.rating), reviewCount: Number(r.review_count), website: r.website ?? undefined, mapsUrl: r.maps_url ?? undefined, score: Number(r.score), waVerified: Boolean(r.wa_verified), message: r.message ?? undefined, messageVariants: parseJson<string[] | undefined>(r.message_variants, undefined), status: r.status, createdAt: fromMysql(r.created_at) ?? todayISO(), contactedAt: fromMysql(r.contacted_at ?? undefined), repliedAt: fromMysql(r.replied_at ?? undefined),
   };
 }
 export async function getQualifiedLeads(opts: { status?: string; limit?: number; waVerifiedOnly?: boolean } = {}) {
@@ -1794,9 +1799,9 @@ export async function insertQualifiedLead(l: QualifiedLead) {
   const conn = await getConn();
   try {
     await conn.query(
-      `INSERT INTO qualified_leads (id, place_id, name, company, phone_628, city, category, rating, review_count, website, score, wa_verified, message, message_variants, status, created_at, contacted_at, replied_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE score=VALUES(score), message=VALUES(message)`,
-      [l.id, l.placeId, l.name, l.company ?? "", l.phone628, l.city ?? "", l.category ?? "", l.rating ?? null, l.reviewCount, l.website ?? "", l.score, l.waVerified ? 1 : 0, l.message ?? null, l.messageVariants ? JSON.stringify(l.messageVariants) : null, l.status, toMysql(l.createdAt), toMysql(l.contactedAt), toMysql(l.repliedAt)]
+      `INSERT INTO qualified_leads (id, place_id, name, company, address, phone_628, city, category, rating, review_count, website, maps_url, score, wa_verified, message, message_variants, status, created_at, contacted_at, replied_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE score=VALUES(score), message=VALUES(message), address=VALUES(address), maps_url=VALUES(maps_url)`,
+      [l.id, l.placeId, l.name, l.company ?? "", l.address ?? null, l.phone628, l.city ?? "", l.category ?? "", l.rating ?? null, l.reviewCount, l.website ?? "", l.mapsUrl ?? "", l.score, l.waVerified ? 1 : 0, l.message ?? null, l.messageVariants ? JSON.stringify(l.messageVariants) : null, l.status, toMysql(l.createdAt), toMysql(l.contactedAt), toMysql(l.repliedAt)]
     );
   } finally { conn.release(); }
 }
@@ -1807,8 +1812,8 @@ export async function updateQualifiedLead(id: string, patch: Partial<QualifiedLe
     if (!cur) return undefined;
     const m = { ...cur, ...patch };
     await conn.query(
-      `UPDATE qualified_leads SET name=?, company=?, phone_628=?, city=?, category=?, rating=?, review_count=?, website=?, score=?, wa_verified=?, message=?, message_variants=?, status=?, contacted_at=?, replied_at=? WHERE id=?`,
-      [m.name, m.company ?? "", m.phone628, m.city ?? "", m.category ?? "", m.rating ?? null, m.reviewCount, m.website ?? "", m.score, m.waVerified ? 1 : 0, m.message ?? null, m.messageVariants ? JSON.stringify(m.messageVariants) : null, m.status, toMysql(m.contactedAt), toMysql(m.repliedAt), id]
+      `UPDATE qualified_leads SET name=?, company=?, address=?, phone_628=?, city=?, category=?, rating=?, review_count=?, website=?, maps_url=?, score=?, wa_verified=?, message=?, message_variants=?, status=?, contacted_at=?, replied_at=? WHERE id=?`,
+      [m.name, m.company ?? "", m.address ?? null, m.phone628, m.city ?? "", m.category ?? "", m.rating ?? null, m.reviewCount, m.website ?? "", m.mapsUrl ?? "", m.score, m.waVerified ? 1 : 0, m.message ?? null, m.messageVariants ? JSON.stringify(m.messageVariants) : null, m.status, toMysql(m.contactedAt), toMysql(m.repliedAt), id]
     );
     return m;
   } finally { conn.release(); }
@@ -1850,7 +1855,30 @@ export async function countWaPending() {
   const conn = await getConn();
   try { const [r] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM wa_verify_pending"); return Number(r[0]?.total ?? 0); } finally { conn.release(); }
 }
-// Arsip satu-kali: pindahkan qualified lama yang wa_verified=0 ke pending + pastikan raw ada, lalu hapus dari qualified.
+// Reset total outreach: kosongkan raw + qualified + pending + counter + webhook,
+// lalu kembalikan SEMUA search_targets ke PENDING (attempts=0).
+export async function resetOutreachData(): Promise<{ raw: number; qualified: number; pending: number; targets: { total: number; byStatus: Record<string, number> } }> {
+  const conn = await getConn();
+  try {
+    const [rawRows] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM raw_leads");
+    const [qRows] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM qualified_leads");
+    const [pRows] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM wa_verify_pending");
+    const raw = Number(rawRows[0]?.total ?? 0);
+    const qualified = Number(qRows[0]?.total ?? 0);
+    const pending = Number(pRows[0]?.total ?? 0);
+    await conn.query("DELETE FROM qualified_leads");
+    await conn.query("DELETE FROM raw_leads");
+    await conn.query("DELETE FROM wa_verify_pending");
+    await conn.query("DELETE FROM webhook_logs");
+    await conn.query("DELETE FROM outreach_daily_counter");
+    await conn.query("UPDATE search_targets SET status='PENDING', attempts=0, last_error=NULL, updated_at=?", [toMysql(todayISO())]);
+    const [tRows] = await conn.query<RowDataPacket[]>("SELECT status, COUNT(*) cnt FROM search_targets GROUP BY status");
+    const byStatus: Record<string, number> = {}; let total = 0;
+    tRows.forEach(r => { byStatus[String(r.status)] = Number(r.cnt); total += Number(r.cnt); });
+    return { raw, qualified, pending, targets: { total, byStatus } };
+  } finally { conn.release(); }
+}
+// Arsip satu-kali: pindahkan qualified lama yang wa_verified=0 ke pending, lalu hapus dari qualified.
 export async function archiveUnverifiedQualified(): Promise<{ archived: number }> {
   const conn = await getConn();
   try {

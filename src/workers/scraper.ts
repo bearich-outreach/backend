@@ -11,6 +11,13 @@ import { generateQualifiedMessage } from "../services/messageGenerator";
 
 function md5(s: string) { return crypto.createHash("md5").update(s).digest("hex"); }
 
+// URL Maps untuk alamat tempat: pakai place_id bila ada (stabil), fallback query nama+alamat.
+export function mapsUrlFor(placeId: string | undefined, name: string, address?: string, city?: string): string {
+  if (placeId) return `https://www.google.com/maps/search/?api=1&query_place_id=${encodeURIComponent(placeId)}`;
+  const q = [name, address, city].filter(Boolean).join(", ");
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
+}
+
 // Simplified scraper: in production uses Playwright to scrape Maps.
 // For now generates 1-3 mock raw leads per keyword to demonstrate pipeline.
 // Real playwright block is guarded by PLAYWRIGHT env.
@@ -114,6 +121,8 @@ export async function processNextTarget(): Promise<{ keyword?: string; rawCount?
           placeId: raw.placeId,
           name: raw.name,
           company: raw.name,
+          address: raw.address,
+          mapsUrl: mapsUrlFor(raw.placeId, raw.name, raw.address, raw.city),
           phone628,
           city: raw.city,
           category: raw.category,

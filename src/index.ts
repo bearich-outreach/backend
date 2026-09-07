@@ -36,17 +36,18 @@ import {
   getDueWaPending,
   getRawLeads,
   getSearchTargets,
-  getSettings,
-  getTask,
+  getSettings,  getTask,
   getTasks,
   getTaskStats,
   getTransaction,
   getTransactions,
+  incrDailyCount,
   insertAccount,
   insertNote,
   insertTask,
   insertTransaction,
   insertWebhookLog,
+  resetOutreachData,
   saveCashflowSettings,
   saveSettings,
   updateAccount,
@@ -237,6 +238,27 @@ outreach.patch("/leads/:id", h(async (req, res) => {
   res.json({ lead: updated });
 }));
 
+outreach.post("/leads/:id/send", h(async (req, res) => {
+  // Kirim manual via tombol di halaman Leads (pengiriman otomatis dimatikan).
+  const cur = await getQualifiedLead(req.params.id);
+  if (!cur) return sendError(res, 404, "not found");
+  if (cur.status !== "New Lead") return sendError(res, 400, "hanya untuk status New Lead");
+  if (!cur.waVerified) return sendError(res, 400, "WA belum terverifikasi aktif");
+  const { sendWA } = await import("./services/waVerify");
+  const text = String(req.body?.message ?? cur.message ?? `Halo ${cur.name} di ${cur.city}, kami Bearich bantu ${cur.category} bikin website.`);
+  if (!text.trim()) return sendError(res, 400, "pesan kosong");
+  const dry = String(process.env.AUTOPILOT_DRY_RUN || "true").toLowerCase() === "true";
+  if (!dry) {
+    const ok = await sendWA(cur.phone628, text);
+    if (!ok) return sendError(res, 500, "gagal kirim WA");
+  }
+  const todayWIB = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" })).toISOString().slice(0, 10);
+  await updateQualifiedLead(cur.id, { status: "Contacted", contactedAt: new Date().toISOString() } as never);
+  await incrDailyCount(todayWIB);
+  await insertWebhookLog(cur.phone628, dry ? "manual_send_dry_run" : "manual_send", { leadId: cur.id });
+  res.json({ ok: true, dry });
+}));
+
 outreach.post("/leads/:id/followup-replied", h(async (req, res) => {
   const cur = await getQualifiedLead(req.params.id);
   if (!cur) return sendError(res, 404, "not found");
@@ -274,22 +296,14 @@ outreach.get("/raw-leads", async (req, res) => {
 
 outreach.get("/scheduler/status", async (_req, res) => {
   const nowWIB = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" }));
-  const todayStr = nowWIB.toISOString().slice(0,10);
+  const todayStr = nowWIB.toISOString().slice(0, 10);
   const daily = await getDailyCount(todayStr);
-  const wibHour = nowWIB.getHours();
-  const isWeekday = nowWIB.getDay() !== 0 && nowWIB.getDay() !== 6;
-  const operational = isWeekday && wibHour >= 9 && wibHour < 16;
-  const settings = await getSettings();
-  const envKey = process.env.DEEPSEEK_API_KEY?.trim();
-  const deepseekMode = settings.provider === "deepseek" && Boolean(envKey || settings.apiKey) ? "deepseek" : "spintax";
   res.json({
+    manual: true,
+    autoSend: false,
     dryRun: String(process.env.AUTOPILOT_DRY_RUN || "true").toLowerCase() === "true",
     dailySent: daily,
-    dailyLimit: 10,
-    operational,
     wibTime: nowWIB.toISOString(),
-    isWeekday,
-    deepseekMode,
   });
 });
 
@@ -297,6 +311,14 @@ outreach.get("/scheduler/status", async (_req, res) => {
 outreach.post("/admin/seed", h(async (_req, res) => {
   const result = await seedSearchTargets();
   res.json(result);
+}));
+// Reset total: kosongkan raw + lead + pending, kembalikan targets ke PENDING, lalu seed hingga 10.280
+outreach.post("/admin/reset", h(async (_req, res) => {
+  const { resetOutreachData } = await import("./db");
+  const reset = await resetOutreachData();
+  const seed = await seedSearchTargets();
+  const counts = await countSearchTargets();
+  res.json({ reset, seed, targets: counts });
 }));
 outreach.post("/admin/scrape-next", h(async (_req, res) => {
   const result = await processNextTarget();
@@ -800,5 +822,5 @@ app.use(
 
 app.listen(PORT, () => {
   console.log(`Bearich Outreach API berjalan di http://localhost:${PORT}`);
-  try { startScheduler(); console.log("Scheduler autopilot aktif (dryRun=" + process.env.AUTOPILOT_DRY_RUN + ")"); } catch {}
+  try { startScheduler(); console.log("Scheduler buffer-refill aktif (kirim WA manual via tombol)"); } catch {}
 });
