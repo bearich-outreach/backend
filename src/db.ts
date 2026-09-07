@@ -1705,6 +1705,16 @@ export async function updateSearchTarget(id: string, patch: Partial<import("./ty
     await conn.query(`UPDATE search_targets SET ${sets.join(", ")} WHERE id = ?`, params);
   } finally { conn.release(); }
 }
+// Kembalikan semua target FAILED -> PENDING agar bisa dicoba lagi (mis. setelah throttling).
+export async function retryFailedTargets(): Promise<{ retried: number }> {
+  const conn = await getConn();
+  try {
+    const [r] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM search_targets WHERE status='FAILED'");
+    const retried = Number(r[0]?.total ?? 0);
+    await conn.query("UPDATE search_targets SET status='PENDING', last_error=NULL, updated_at=? WHERE status='FAILED'", [toMysql(todayISO())]);
+    return { retried };
+  } finally { conn.release(); }
+}
 export async function claimNextSearchTarget(): Promise<import("./types").SearchTarget | undefined> {
   const conn = await getConn();
   try {

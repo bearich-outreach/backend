@@ -3,6 +3,7 @@ import { upsertRawLead, claimNextSearchTarget, updateSearchTarget, getQualifiedL
 import { normalizePhone, isClosedStatus } from "../services/cleansing";
 import { scoreLead } from "../services/scoring";
 import { verifyWA } from "../services/waVerify";
+import { scrapeMapsPlaces } from "../services/mapsScrape";
 import { RawLead } from "../types";
 import { uid, todayISO } from "../store";
 import { getSettings } from "../db";
@@ -11,40 +12,52 @@ import { generateQualifiedMessage } from "../services/messageGenerator";
 
 function md5(s: string) { return crypto.createHash("md5").update(s).digest("hex"); }
 
-// URL Maps untuk alamat tempat: pakai place_id bila ada (stabil), fallback query nama+alamat.
-export function mapsUrlFor(placeId: string | undefined, name: string, address?: string, city?: string): string {
-  if (placeId) return `https://www.google.com/maps/search/?api=1&query_place_id=${encodeURIComponent(placeId)}`;
+// URL Maps untuk alamat tempat:
+// 1. URL kanonis asli dari hasil scrape -> membuka pin/listing yang tepat.
+// 2. place_id ChIJ asli -> query_place_id.
+// 3. Fallback query teks (tidak membuka pin spesifik).
+export function mapsUrlFor(placeId: string | undefined, name: string, address?: string, city?: string, canonicalUrl?: string): string {
+  if (canonicalUrl && canonicalUrl.includes("/maps/")) return canonicalUrl;
+  if (placeId && /^ChIJ[A-Za-z0-9_-]+$/.test(placeId)) return `https://www.google.com/maps/search/?api=1&query_place_id=${encodeURIComponent(placeId)}`;
   const q = [name, address, city].filter(Boolean).join(", ");
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
 }
 
-// Simplified scraper: in production uses Playwright to scrape Maps.
-// For now generates 1-3 mock raw leads per keyword to demonstrate pipeline.
-// Real playwright block is guarded by PLAYWRIGHT env.
+// Scrape asli Google Maps via Playwright.
+// - USE_PLAYWRIGHT=true -> hasil asli (wajib di production).
+// - Mock hanya untuk dev lokal (MOCK_SCRAPE=true) agar tidak ada data palsu di prod.
 async function scrapeKeyword(keyword: string, city: string, category: string): Promise<RawLead[]> {
-  const tryPlaywright = process.env.USE_PLAYWRIGHT === "true";
-  if (tryPlaywright) {
-    try {
-      const { chromium } = await import("playwright");
-      const uaList = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/119.0.0.0 Mobile Safari/537.36",
-      ];
-      const browser = await chromium.launch({
-        headless: true,
-        executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,
-        args: ["--no-sandbox"],
-      });
-      const ctx = await browser.newContext({ userAgent: uaList[Math.floor(Math.random()*uaList.length)] });
-      const page = await ctx.newPage();
-      await page.goto(`https://www.google.com/maps/search/${encodeURIComponent(keyword)}`, { waitUntil: "domcontentloaded", timeout: 30000 });
-      await page.waitForTimeout(2000 + Math.random()*3000);
-      // placeholder: real extraction would parse place_id, rating, etc.
-      await browser.close();
-    } catch {
-      // fallthrough to mock
+  const usePlaywright = process.env.USE_PLAYWRIGHT === "true";
+  if (usePlaywright) {
+    const places = await scrapeMapsPlaces(keyword);
+    if (places.length > 0) {
+      const now = todayISO();
+      return places.map((p) => ({
+        id: uid("raw_"),
+        placeId: p.placeKey,
+        name: p.name, // nama asli tempat
+        address: p.address, // alamat asli
+        phoneRaw: p.phoneRaw,
+        website: p.website,
+        rating: p.rating,
+        reviewCount: p.reviewCount,
+        mapsStatus: "OPERATIONAL" as const,
+        city, category, keyword,
+        rawJson: { keyword, source: "maps", canonicalUrl: p.detailUrl },
+        createdAt: now,
+        lastSeenAt: now,
+      }));
     }
+    // tidak ada hasil asli -> kembalikan kosong (jangan karang data)
+    if (process.env.NODE_ENV === "production") return [];
   }
+  if (process.env.MOCK_SCRAPE === "true" || process.env.NODE_ENV !== "production") {
+    return mockLeads(keyword, city, category);
+  }
+  return [];
+}
+
+function mockLeads(keyword: string, city: string, category: string): RawLead[] {
   // mock 2 leads per keyword
   const leads: RawLead[] = [];
   const now = todayISO();
@@ -92,6 +105,11 @@ export async function processNextTarget(): Promise<{ keyword?: string; rawCount?
   if (!target) return {};
   try {
     const rawLeads = await scrapeKeyword(target.keyword, target.city, target.category);
+    if (rawLeads.length === 0 && process.env.USE_PLAYWRIGHT === "true") {
+      // Kemungkinan throttling Google / tidak ada hasil: JANGAN tandai DONE agar tidak hangus.
+      await updateSearchTarget(target.id, { status: "FAILED", lastError: "tidak ada hasil (kemungkinan throttling Google, bisa di-retry)" });
+      return { keyword: target.keyword, rawCount: 0, qualifiedCount: 0, retried };
+    }
     if (rawLeads.some(r => isClosedStatus(r.mapsStatus))) {
       // filter closed
     }
@@ -122,7 +140,7 @@ export async function processNextTarget(): Promise<{ keyword?: string; rawCount?
           name: raw.name,
           company: raw.name,
           address: raw.address,
-          mapsUrl: mapsUrlFor(raw.placeId, raw.name, raw.address, raw.city),
+          mapsUrl: mapsUrlFor(raw.placeId, raw.name, raw.address, raw.city, (raw.rawJson as { canonicalUrl?: string } | undefined)?.canonicalUrl),
           phone628,
           city: raw.city,
           category: raw.category,

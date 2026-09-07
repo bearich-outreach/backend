@@ -48,6 +48,7 @@ import {
   insertTransaction,
   insertWebhookLog,
   resetOutreachData,
+  retryFailedTargets,
   saveCashflowSettings,
   saveSettings,
   updateAccount,
@@ -322,6 +323,11 @@ outreach.post("/admin/reset", h(async (_req, res) => {
 }));
 outreach.post("/admin/scrape-next", h(async (_req, res) => {
   const result = await processNextTarget();
+  res.json(result);
+}));
+// Kembalikan target FAILED (throttling/captcha) -> PENDING agar bisa dicoba lagi
+outreach.post("/admin/targets/retry-failed", h(async (_req, res) => {
+  const result = await retryFailedTargets();
   res.json(result);
 }));
 // Arsip satu-kali: qualified lama wa_verified=0 -> pending retry (tidak dihapus permanen tanpa jejak)
