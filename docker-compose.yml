@@ -26,12 +26,15 @@ services:
       AUTOPILOT_DRY_RUN: ${AUTOPILOT_DRY_RUN:-true}
       DAILY_DEEPSEEK_LIMIT: ${DAILY_DEEPSEEK_LIMIT:-15}
       PROXY_URL: ${PROXY_URL:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
     networks:
       - global-network
     shm_size: 1gb
 
   evolution:
-    image: atendai/evolution-api:latest
+    image: evoapicloud/evolution-api:latest
     container_name: bearich-evolution
     restart: unless-stopped
     ports:

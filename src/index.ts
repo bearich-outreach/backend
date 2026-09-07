@@ -191,13 +191,16 @@ const outreach = express.Router();
 outreach.use(requirePlatformAuth);
 
 outreach.get("/stats", async (_req, res) => {
-  const [qualified, targets, rawCount] = await Promise.all([
+  const [qualified, targets, rawCount, settings] = await Promise.all([
     countQualifiedLeads(),
     countSearchTargets(),
     countRawLeads(),
+    getSettings(),
   ]);
   const daily = await getDailyCount(new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" })).toISOString().slice(0,10));
-  res.json({ metrics: { qualified, targets, rawLeads: rawCount, dailySent: daily } });
+  const envKey = process.env.DEEPSEEK_API_KEY?.trim();
+  const deepseekMode = settings.provider === "deepseek" && Boolean(envKey || settings.apiKey) ? "deepseek" : "spintax";
+  res.json({ metrics: { qualified, targets, rawLeads: rawCount, dailySent: daily, deepseekMode } });
 });
 
 outreach.get("/queue", async (_req, res) => {
@@ -272,6 +275,9 @@ outreach.get("/scheduler/status", async (_req, res) => {
   const wibHour = nowWIB.getHours();
   const isWeekday = nowWIB.getDay() !== 0 && nowWIB.getDay() !== 6;
   const operational = isWeekday && wibHour >= 9 && wibHour < 16;
+  const settings = await getSettings();
+  const envKey = process.env.DEEPSEEK_API_KEY?.trim();
+  const deepseekMode = settings.provider === "deepseek" && Boolean(envKey || settings.apiKey) ? "deepseek" : "spintax";
   res.json({
     dryRun: String(process.env.AUTOPILOT_DRY_RUN || "true").toLowerCase() === "true",
     dailySent: daily,
@@ -279,6 +285,7 @@ outreach.get("/scheduler/status", async (_req, res) => {
     operational,
     wibTime: nowWIB.toISOString(),
     isWeekday,
+    deepseekMode,
   });
 });
 
@@ -294,6 +301,10 @@ outreach.post("/admin/scrape-next", h(async (_req, res) => {
 
 outreach.get("/settings", async (_req, res) => {
   const settings = await getSettings();
+  // mask apiKey if from .env is set (secure), but respect toggle provider
+  if (process.env.DEEPSEEK_API_KEY?.trim()) {
+    settings.apiKey = "";
+  }
   res.json({ settings });
 });
 
@@ -301,6 +312,12 @@ outreach.post("/settings", async (req, res) => {
   const current = await getSettings();
   const body = (req.body ?? {}) as Partial<Settings>;
   const merged: Settings = { ...current, ...body };
+  if (process.env.DEEPSEEK_API_KEY?.trim()) {
+    merged.apiKey = "";
+    // provider toggle tetap dihormati (none/spintax vs deepseek)
+    if (process.env.DEEPSEEK_BASE_URL) merged.baseUrl = process.env.DEEPSEEK_BASE_URL;
+    if (process.env.DEEPSEEK_MODEL) merged.model = process.env.DEEPSEEK_MODEL;
+  }
   if (Array.isArray(body.services)) {
     merged.services = body.services.map(String).filter(Boolean);
   }
@@ -314,6 +331,10 @@ outreach.post("/settings", async (req, res) => {
       }));
   }
   const saved = await saveSettings(merged);
+  if (process.env.DEEPSEEK_API_KEY?.trim()) {
+    saved.apiKey = "";
+    saved.provider = "deepseek";
+  }
   res.json({ settings: saved });
 });
 

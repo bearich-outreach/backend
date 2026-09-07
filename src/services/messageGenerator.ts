@@ -15,8 +15,11 @@ export async function generateQualifiedMessage(raw: RawLead, settings: Settings)
     .replaceAll("{reviewCount}", String(raw.reviewCount ?? ""));
 
   const dailyLimit = Number(process.env.DAILY_DEEPSEEK_LIMIT || 15);
-  // simple in-mem counter handled by caller; here just try DeepSeek if key exists
-  const useAI = settings.provider !== "none" && Boolean(settings.apiKey?.trim()) && dailyLimit > 0;
+  const envKey = process.env.DEEPSEEK_API_KEY?.trim() || "";
+  const apiKey = envKey || settings.apiKey?.trim() || "";
+  const baseUrl = process.env.DEEPSEEK_BASE_URL?.trim() || settings.baseUrl;
+  const model = process.env.DEEPSEEK_MODEL?.trim() || settings.model;
+  const useAI = settings.provider === "deepseek" && Boolean(apiKey) && dailyLimit > 0;
 
   if (!useAI) {
     const spintaxBase = `{Halo|Hai} ${raw.name} di ${raw.city}, {saya|kami} dari ${settings.businessName} bantu ${raw.category} bikin website modern. ${filled} {Minat?|Boleh diskusi?}`;
@@ -26,17 +29,25 @@ export async function generateQualifiedMessage(raw: RawLead, settings: Settings)
 
   try {
     const prompt = `Buat pesan WA singkat (max 120 kata) untuk ${raw.name} (${raw.category} di ${raw.city}, rating ${raw.rating}, ${raw.reviewCount} ulasan). Tawarkan ${settings.businessName}: ${settings.services.join(", ")}. Variasi spintax ringan. Hanya teks pesan.`;
-    const res = await fetch(`${settings.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    const res = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${settings.apiKey}` },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
-        model: settings.model,
+        model,
         messages: [{ role: "user", content: prompt }],
         temperature: 0.7,
         max_tokens: 300,
       }),
     });
-    if (!res.ok) throw new Error("ai fail");
+    if (!res.ok) {
+      if (res.status === 402 || res.status === 429 || res.status === 401) {
+        try {
+          const { saveSettings } = await import("../db");
+          await saveSettings({ ...settings, provider: "none" });
+        } catch {}
+      }
+      throw new Error(`ai fail ${res.status}`);
+    }
     const data = await res.json() as { choices?: { message?: { content?: string } }[] };
     const content = data.choices?.[0]?.message?.content?.trim();
     if (!content) throw new Error("empty");
