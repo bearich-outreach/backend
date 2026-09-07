@@ -166,6 +166,67 @@ export interface Note {
   updatedAt: string;
 }
 
+export type QualifiedLeadStatus = "New Lead" | "Contacted" | "Replied";
+
+export interface SearchTarget {
+  id: string;
+  keyword: string;
+  city: string;
+  category: string;
+  status: "PENDING" | "PROCESSING" | "DONE" | "FAILED";
+  attempts: number;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RawLead {
+  id: string;
+  placeId: string;
+  name: string;
+  address?: string;
+  phoneRaw?: string;
+  website?: string;
+  rating?: number;
+  reviewCount: number;
+  mapsStatus: "OPERATIONAL" | "CLOSED_PERMANENTLY" | "UNKNOWN";
+  city?: string;
+  category?: string;
+  keyword?: string;
+  rawJson?: unknown;
+  createdAt: string;
+  lastSeenAt: string;
+}
+
+export interface QualifiedLead {
+  id: string;
+  placeId: string;
+  name: string;
+  company?: string;
+  phone628: string;
+  city?: string;
+  category?: string;
+  rating?: number;
+  reviewCount: number;
+  website?: string;
+  score: number;
+  waVerified: boolean;
+  message?: string;
+  messageVariants?: string[];
+  status: QualifiedLeadStatus;
+  createdAt: string;
+  contactedAt?: string;
+  repliedAt?: string;
+}
+
+export interface WebhookLog {
+  id: string;
+  phone628: string;
+  event: string;
+  payload?: unknown;
+  createdAt: string;
+}
+
 export type TaskStatus = "todo" | "in_progress" | "done";
 export type TaskPriority = "low" | "medium" | "high";
 

@@ -16,6 +16,9 @@ import {
   Note,
   Prospect,
   ProspectStatus,
+  QualifiedLead,
+  RawLead,
+  SearchTarget,
   SequenceStep,
   Settings,
   Task,
@@ -434,6 +437,86 @@ export async function ensureSchema(): Promise<void> {
         );
       }
     }
+
+    // Autopilot tables
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS search_targets (
+        id VARCHAR(40) PRIMARY KEY,
+        keyword VARCHAR(255) NOT NULL,
+        city VARCHAR(100) NOT NULL,
+        category VARCHAR(100) NOT NULL,
+        status ENUM('PENDING','PROCESSING','DONE','FAILED') NOT NULL DEFAULT 'PENDING',
+        attempts INT NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at DATETIME(3) NOT NULL,
+        updated_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uq_keyword (keyword),
+        INDEX idx_status (status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS raw_leads (
+        id VARCHAR(40) PRIMARY KEY,
+        place_id VARCHAR(100) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        address TEXT,
+        phone_raw VARCHAR(50) DEFAULT '',
+        website VARCHAR(255) DEFAULT '',
+        rating DECIMAL(2,1) NULL,
+        review_count INT NOT NULL DEFAULT 0,
+        maps_status ENUM('OPERATIONAL','CLOSED_PERMANENTLY','UNKNOWN') NOT NULL DEFAULT 'UNKNOWN',
+        city VARCHAR(100) NOT NULL DEFAULT '',
+        category VARCHAR(100) NOT NULL DEFAULT '',
+        keyword VARCHAR(255) NOT NULL DEFAULT '',
+        raw_json JSON,
+        created_at DATETIME(3) NOT NULL,
+        last_seen_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uq_place (place_id),
+        INDEX idx_city_cat (city, category)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS qualified_leads (
+        id VARCHAR(40) PRIMARY KEY,
+        place_id VARCHAR(100) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        company VARCHAR(255) NOT NULL DEFAULT '',
+        phone_628 VARCHAR(20) NOT NULL,
+        city VARCHAR(100) NOT NULL DEFAULT '',
+        category VARCHAR(100) NOT NULL DEFAULT '',
+        rating DECIMAL(2,1) NULL,
+        review_count INT NOT NULL DEFAULT 0,
+        website VARCHAR(255) DEFAULT '',
+        score INT NOT NULL,
+        wa_verified TINYINT(1) NOT NULL DEFAULT 0,
+        message TEXT,
+        message_variants JSON,
+        status ENUM('New Lead','Contacted','Replied') NOT NULL DEFAULT 'New Lead',
+        created_at DATETIME(3) NOT NULL,
+        contacted_at DATETIME(3) NULL,
+        replied_at DATETIME(3) NULL,
+        UNIQUE KEY uq_place (place_id),
+        UNIQUE KEY uq_phone (phone_628),
+        INDEX idx_status (status),
+        INDEX idx_score (score)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS webhook_logs (
+        id VARCHAR(40) PRIMARY KEY,
+        phone_628 VARCHAR(20) NOT NULL DEFAULT '',
+        event VARCHAR(50) NOT NULL DEFAULT '',
+        payload JSON,
+        created_at DATETIME(3) NOT NULL,
+        INDEX idx_phone (phone_628)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS outreach_daily_counter (
+        date DATE PRIMARY KEY,
+        count INT NOT NULL DEFAULT 0
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
   } finally {
     conn.release();
   }
@@ -1533,4 +1616,215 @@ export async function getTaskStats(): Promise<TaskStats> {
   } finally {
     conn.release();
   }
+}
+
+/* ---------- Autopilot ---------- */
+
+interface SearchTargetRow extends RowDataPacket {
+  id: string;
+  keyword: string;
+  city: string;
+  category: string;
+  status: SearchTarget["status"];
+  attempts: number;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+function rowToSearchTarget(r: SearchTargetRow): import("./types").SearchTarget {
+  return {
+    id: r.id,
+    keyword: r.keyword,
+    city: r.city,
+    category: r.category,
+    status: r.status,
+    attempts: Number(r.attempts),
+    lastError: r.last_error ?? undefined,
+    createdAt: fromMysql(r.created_at) ?? todayISO(),
+    updatedAt: fromMysql(r.updated_at) ?? todayISO(),
+  };
+}
+export async function getSearchTargets(opts: { status?: string; limit?: number } = {}) {
+  const conn = await getConn();
+  try {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (opts.status) { where.push("status = ?"); params.push(opts.status); }
+    const limit = Math.min(Math.max(Number(opts.limit) || 100, 1), 1000);
+    const sql = "SELECT * FROM search_targets" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY created_at ASC LIMIT " + limit;
+    const [rows] = await conn.query<SearchTargetRow[]>(sql, params);
+    return rows.map(rowToSearchTarget);
+  } finally { conn.release(); }
+}
+export async function countSearchTargets() {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<RowDataPacket[]>("SELECT status, COUNT(*) cnt FROM search_targets GROUP BY status");
+    const byStatus: Record<string, number> = {};
+    let total = 0;
+    rows.forEach(r => { byStatus[String(r.status)] = Number(r.cnt); total += Number(r.cnt); });
+    return { total, byStatus };
+  } finally { conn.release(); }
+}
+export async function insertSearchTarget(t: import("./types").SearchTarget) {
+  const conn = await getConn();
+  try {
+    await conn.query(
+      "INSERT INTO search_targets (id, keyword, city, category, status, attempts, last_error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE updated_at=VALUES(updated_at)",
+      [t.id, t.keyword, t.city, t.category, t.status, t.attempts, t.lastError ?? null, toMysql(t.createdAt), toMysql(t.updatedAt)]
+    );
+  } finally { conn.release(); }
+}
+export async function updateSearchTarget(id: string, patch: Partial<import("./types").SearchTarget>) {
+  const conn = await getConn();
+  try {
+    const sets: string[] = []; const params: unknown[] = [];
+    if (patch.status) { sets.push("status = ?"); params.push(patch.status); }
+    if (patch.attempts !== undefined) { sets.push("attempts = ?"); params.push(patch.attempts); }
+    if (patch.lastError !== undefined) { sets.push("last_error = ?"); params.push(patch.lastError); }
+    sets.push("updated_at = ?"); params.push(toMysql(todayISO()));
+    params.push(id);
+    await conn.query(`UPDATE search_targets SET ${sets.join(", ")} WHERE id = ?`, params);
+  } finally { conn.release(); }
+}
+export async function claimNextSearchTarget(): Promise<import("./types").SearchTarget | undefined> {
+  const conn = await getConn();
+  try {
+    await conn.query("START TRANSACTION");
+    const [rows] = await conn.query<SearchTargetRow[]>(
+      "SELECT * FROM search_targets WHERE status='PENDING' ORDER BY created_at ASC LIMIT 1 FOR UPDATE"
+    );
+    if (!rows.length) { await conn.query("COMMIT"); return undefined; }
+    const t = rows[0];
+    await conn.query("UPDATE search_targets SET status='PROCESSING', attempts=attempts+1, updated_at=? WHERE id=?", [toMysql(todayISO()), t.id]);
+    await conn.query("COMMIT");
+    return rowToSearchTarget({ ...t, status: "PROCESSING", attempts: Number(t.attempts)+1 });
+  } catch {
+    try { await conn.query("ROLLBACK"); } catch {}
+    return undefined;
+  } finally { conn.release(); }
+}
+
+interface RawLeadRow extends RowDataPacket {
+  id: string; place_id: string; name: string; address: string | null; phone_raw: string; website: string; rating: string | null; review_count: number; maps_status: RawLead["mapsStatus"]; city: string; category: string; keyword: string; raw_json: string | unknown; created_at: string; last_seen_at: string;
+}
+function rowToRawLead(r: RawLeadRow): RawLead {
+  return {
+    id: r.id, placeId: r.place_id, name: r.name, address: r.address ?? undefined, phoneRaw: r.phone_raw ?? undefined, website: r.website ?? undefined,
+    rating: r.rating == null ? undefined : Number(r.rating), reviewCount: Number(r.review_count), mapsStatus: r.maps_status, city: r.city ?? undefined, category: r.category ?? undefined, keyword: r.keyword ?? undefined, rawJson: parseJson(r.raw_json, undefined), createdAt: fromMysql(r.created_at) ?? todayISO(), lastSeenAt: fromMysql(r.last_seen_at) ?? todayISO(),
+  };
+}
+export async function upsertRawLead(lead: RawLead) {
+  const conn = await getConn();
+  try {
+    await conn.query(
+      `INSERT INTO raw_leads (id, place_id, name, address, phone_raw, website, rating, review_count, maps_status, city, category, keyword, raw_json, created_at, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE last_seen_at=VALUES(last_seen_at), raw_json=VALUES(raw_json), rating=VALUES(rating), review_count=VALUES(review_count), phone_raw=VALUES(phone_raw), website=VALUES(website)`,
+      [lead.id, lead.placeId, lead.name, lead.address ?? "", lead.phoneRaw ?? "", lead.website ?? "", lead.rating ?? null, lead.reviewCount, lead.mapsStatus, lead.city ?? "", lead.category ?? "", lead.keyword ?? "", lead.rawJson ? JSON.stringify(lead.rawJson) : null, toMysql(lead.createdAt), toMysql(lead.lastSeenAt)]
+    );
+  } finally { conn.release(); }
+}
+export async function getRawLeads(opts: { city?: string; category?: string; limit?: number } = {}) {
+  const conn = await getConn();
+  try {
+    const where: string[] = []; const params: unknown[] = [];
+    if (opts.city) { where.push("city = ?"); params.push(opts.city); }
+    if (opts.category) { where.push("category = ?"); params.push(opts.category); }
+    const lim = Math.min(Math.max(Number(opts.limit) || 50, 1), 500);
+    const sql = "SELECT * FROM raw_leads" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY last_seen_at DESC LIMIT " + lim;
+    const [rows] = await conn.query<RawLeadRow[]>(sql, params);
+    return rows.map(rowToRawLead);
+  } finally { conn.release(); }
+}
+export async function countRawLeads() {
+  const conn = await getConn();
+  try { const [r] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM raw_leads"); return Number(r[0]?.total ?? 0); } finally { conn.release(); }
+}
+
+interface QualifiedLeadRow extends RowDataPacket {
+  id: string; place_id: string; name: string; company: string; phone_628: string; city: string; category: string; rating: string | null; review_count: number; website: string; score: number; wa_verified: number; message: string | null; message_variants: string | unknown; status: QualifiedLead["status"]; created_at: string; contacted_at: string | null; replied_at: string | null;
+}
+function rowToQualifiedLead(r: QualifiedLeadRow): QualifiedLead {
+  return {
+    id: r.id, placeId: r.place_id, name: r.name, company: r.company ?? undefined, phone628: r.phone_628, city: r.city ?? undefined, category: r.category ?? undefined, rating: r.rating == null ? undefined : Number(r.rating), reviewCount: Number(r.review_count), website: r.website ?? undefined, score: Number(r.score), waVerified: Boolean(r.wa_verified), message: r.message ?? undefined, messageVariants: parseJson<string[] | undefined>(r.message_variants, undefined), status: r.status, createdAt: fromMysql(r.created_at) ?? todayISO(), contactedAt: fromMysql(r.contacted_at ?? undefined), repliedAt: fromMysql(r.replied_at ?? undefined),
+  };
+}
+export async function getQualifiedLeads(opts: { status?: string; limit?: number } = {}) {
+  const conn = await getConn();
+  try {
+    const where: string[] = []; const params: unknown[] = [];
+    if (opts.status) { where.push("status = ?"); params.push(opts.status); }
+    const lim = Math.min(Math.max(Number(opts.limit) || 100, 1), 1000);
+    const sql = "SELECT * FROM qualified_leads" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY score DESC, created_at DESC LIMIT " + lim;
+    const [rows] = await conn.query<QualifiedLeadRow[]>(sql, params);
+    return rows.map(rowToQualifiedLead);
+  } finally { conn.release(); }
+}
+export async function getQualifiedLead(id: string) {
+  const conn = await getConn();
+  try { const [rows] = await conn.query<QualifiedLeadRow[]>("SELECT * FROM qualified_leads WHERE id = ?", [id]); return rows.length ? rowToQualifiedLead(rows[0]) : undefined; } finally { conn.release(); }
+}
+export async function countQualifiedLeads() {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<RowDataPacket[]>("SELECT status, COUNT(*) cnt FROM qualified_leads GROUP BY status");
+    const byStatus: Record<string, number> = {}; let total = 0;
+    rows.forEach(r => { byStatus[String(r.status)] = Number(r.cnt); total += Number(r.cnt); });
+    return { total, byStatus };
+  } finally { conn.release(); }
+}
+export async function insertQualifiedLead(l: QualifiedLead) {
+  const conn = await getConn();
+  try {
+    await conn.query(
+      `INSERT INTO qualified_leads (id, place_id, name, company, phone_628, city, category, rating, review_count, website, score, wa_verified, message, message_variants, status, created_at, contacted_at, replied_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE score=VALUES(score), message=VALUES(message)`,
+      [l.id, l.placeId, l.name, l.company ?? "", l.phone628, l.city ?? "", l.category ?? "", l.rating ?? null, l.reviewCount, l.website ?? "", l.score, l.waVerified ? 1 : 0, l.message ?? null, l.messageVariants ? JSON.stringify(l.messageVariants) : null, l.status, toMysql(l.createdAt), toMysql(l.contactedAt), toMysql(l.repliedAt)]
+    );
+  } finally { conn.release(); }
+}
+export async function updateQualifiedLead(id: string, patch: Partial<QualifiedLead>) {
+  const conn = await getConn();
+  try {
+    const cur = await getQualifiedLead(id);
+    if (!cur) return undefined;
+    const m = { ...cur, ...patch };
+    await conn.query(
+      `UPDATE qualified_leads SET name=?, company=?, phone_628=?, city=?, category=?, rating=?, review_count=?, website=?, score=?, wa_verified=?, message=?, message_variants=?, status=?, contacted_at=?, replied_at=? WHERE id=?`,
+      [m.name, m.company ?? "", m.phone628, m.city ?? "", m.category ?? "", m.rating ?? null, m.reviewCount, m.website ?? "", m.score, m.waVerified ? 1 : 0, m.message ?? null, m.messageVariants ? JSON.stringify(m.messageVariants) : null, m.status, toMysql(m.contactedAt), toMysql(m.repliedAt), id]
+    );
+    return m;
+  } finally { conn.release(); }
+}
+export async function findQualifiedByPhone(phone628: string) {
+  const conn = await getConn();
+  try { const [rows] = await conn.query<QualifiedLeadRow[]>("SELECT * FROM qualified_leads WHERE phone_628=? LIMIT 1", [phone628]); return rows.length ? rowToQualifiedLead(rows[0]) : undefined; } finally { conn.release(); }
+}
+
+export async function insertWebhookLog(phone628: string, event: string, payload: unknown) {
+  const conn = await getConn();
+  try { await conn.query("INSERT INTO webhook_logs (id, phone_628, event, payload, created_at) VALUES (?, ?, ?, ?, ?)", [uid("wh_"), phone628, event, payload ? JSON.stringify(payload) : null, toMysql(todayISO())]); } finally { conn.release(); }
+}
+
+export async function getDailyCount(dateStr: string): Promise<number> {
+  const conn = await getConn();
+  try { const [rows] = await conn.query<RowDataPacket[]>("SELECT count FROM outreach_daily_counter WHERE date=?", [dateStr]); return rows.length ? Number(rows[0].count) : 0; } finally { conn.release(); }
+}
+export async function incrDailyCount(dateStr: string): Promise<number> {
+  const conn = await getConn();
+  try {
+    await conn.query("INSERT INTO outreach_daily_counter (date, count) VALUES (?, 1) ON DUPLICATE KEY UPDATE count=count+1", [dateStr]);
+    const [rows] = await conn.query<RowDataPacket[]>("SELECT count FROM outreach_daily_counter WHERE date=?", [dateStr]);
+    return Number(rows[0]?.count ?? 0);
+  } finally { conn.release(); }
+}
+export async function getOutreachStats() {
+  const [qCount, qBy, rawTotal, targetCount] = await Promise.all([countQualifiedLeads(), countQualifiedLeads(), countRawLeads(), countSearchTargets()]);
+  // qBy duplicate call intentional above, fix: reuse
+  void qCount;
+  const q = await countQualifiedLeads();
+  const t = await countSearchTargets();
+  const r = await countRawLeads();
+  return { qualified: q, targets: t, rawLeads: r };
 }

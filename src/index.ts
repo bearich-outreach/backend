@@ -11,25 +11,28 @@ import {
   verifyToken,
 } from "./auth";
 import {
+  countQualifiedLeads,
+  countRawLeads,
+  countSearchTargets,
   createTransfer,
   deleteAccount,
   deleteNote,
-  deleteProspect,
   deleteTask,
   deleteTransaction,
+  findQualifiedByPhone,
   getAccount,
   getAccounts,
-  getActivities,
   getApps,
   getCashflowSettings,
   getCashflowSummary,
-  getDue,
-  getMetrics,
+  getDailyCount,
   getNote,
   getNotes,
   getNoteTags,
-  getProspect,
-  getProspects,
+  getQualifiedLead,
+  getQualifiedLeads,
+  getRawLeads,
+  getSearchTargets,
   getSettings,
   getTask,
   getTasks,
@@ -38,21 +41,22 @@ import {
   getTransactions,
   insertAccount,
   insertNote,
-  insertProspect,
   insertTask,
   insertTransaction,
+  insertWebhookLog,
   saveCashflowSettings,
   saveSettings,
   updateAccount,
   updateNote,
-  updateProspect,
+  updateQualifiedLead,
   updateTask,
   updateTransaction,
 } from "./db";
-import { advanceProspect, exportCsv, parseCsv, setStatus, logNote } from "./outreach";
-import { generateMessage } from "./ai";
-import { createProspect, todayISO, uid } from "./store";
-import { AccountType, CashflowSettings, Note, Prospect, ProspectStatus, Settings, Task } from "./types";
+import { todayISO, uid } from "./store";
+import { AccountType, CashflowSettings, Note, ProspectStatus, Settings, Task } from "./types";
+import { seedSearchTargets } from "./seeder/searchTargets";
+import { processNextTarget } from "./workers/scraper";
+import { startScheduler } from "./workers/scheduler";
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
@@ -181,127 +185,112 @@ app.get("/api/apps", requirePlatformAuth, async (_req, res) => {
   res.json({ apps });
 });
 
-/* ---------- Outreach app ---------- */
+/* ---------- Outreach Autopilot ---------- */
 
 const outreach = express.Router();
 outreach.use(requirePlatformAuth);
 
 outreach.get("/stats", async (_req, res) => {
-  const metrics = await getMetrics();
-  res.json({ metrics });
+  const [qualified, targets, rawCount] = await Promise.all([
+    countQualifiedLeads(),
+    countSearchTargets(),
+    countRawLeads(),
+  ]);
+  const daily = await getDailyCount(new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" })).toISOString().slice(0,10));
+  res.json({ metrics: { qualified, targets, rawLeads: rawCount, dailySent: daily } });
 });
 
 outreach.get("/queue", async (_req, res) => {
-  const due = await getDue();
-  res.json({ due });
+  // Monitor: New Lead waiting
+  const leads = await getQualifiedLeads({ status: "New Lead", limit: 50 });
+  res.json({ due: leads });
 });
 
-outreach.get("/prospects", async (_req, res) => {
-  const prospects = await getProspects();
-  res.json({ prospects });
+outreach.get("/leads", async (req, res) => {
+  const status = String(req.query.status ?? "");
+  const leads = await getQualifiedLeads({ status: status || undefined, limit: 200 });
+  res.json({ leads });
 });
 
-outreach.post("/prospects", async (req, res) => {
+outreach.get("/leads/:id", async (req, res) => {
+  const l = await getQualifiedLead(req.params.id);
+  if (!l) return sendError(res, 404, "not found");
+  res.json({ lead: l });
+});
+
+outreach.patch("/leads/:id", h(async (req, res) => {
+  const cur = await getQualifiedLead(req.params.id);
+  if (!cur) return sendError(res, 404, "not found");
   const body = req.body ?? {};
-  if (!body.name) return sendError(res, 400, "name is required");
-  const prospect = { ...createProspect(body), id: uid("p_"), createdAt: todayISO() };
-  await insertProspect(prospect);
-  res.status(201).json({ prospect });
-});
+  const allowed = ["name","company","city","category"];
+  const patch: Record<string, unknown> = {};
+  for (const k of allowed) if (body[k] !== undefined) (patch as Record<string,unknown>)[k] = String(body[k]).trim();
+  if (body.status && ["New Lead","Contacted","Replied"].includes(String(body.status))) patch.status = String(body.status);
+  const updated = await updateQualifiedLead(req.params.id, patch as never);
+  res.json({ lead: updated });
+}));
 
-outreach.post("/prospects/import", async (req, res) => {
-  const csv = req.body?.csv;
-  if (!csv) return sendError(res, 400, "csv is required");
-  const imported = parseCsv(String(csv));
-  for (const p of imported) await insertProspect(p);
-  res.status(201).json({ imported: imported.length });
-});
-
-outreach.get("/prospects/export", async (_req, res) => {
-  const prospects = await getProspects();
-  const csv = exportCsv(prospects);
-  res
-    .setHeader("Content-Type", "text/csv; charset=utf-8")
-    .setHeader("Content-Disposition", 'attachment; filename="prospects.csv"')
-    .send(csv);
-});
-
-outreach.get("/prospects/:id", async (req, res) => {
-  const p = await getProspect(req.params.id);
-  if (!p) return sendError(res, 404, "not found");
-  res.json({ prospect: p });
-});
-
-outreach.patch("/prospects/:id", async (req, res) => {
-  const current = await getProspect(req.params.id);
-  if (!current) return sendError(res, 404, "not found");
-  const body = req.body ?? {};
-  if (body.name !== undefined && !String(body.name).trim()) {
-    return sendError(res, 400, "Name cannot be empty");
+outreach.post("/leads/:id/followup-replied", h(async (req, res) => {
+  const cur = await getQualifiedLead(req.params.id);
+  if (!cur) return sendError(res, 404, "not found");
+  if (cur.status !== "Replied") return sendError(res, 400, "hanya untuk status Replied");
+  const repliedAt = cur.repliedAt ? new Date(cur.repliedAt) : null;
+  if (repliedAt) {
+    const diffDays = (Date.now() - repliedAt.getTime()) / (1000*60*60*24);
+    if (diffDays < 3) return sendError(res, 400, "follow-up hanya setelah 3 hari dari replied");
   }
-  const allowed = ["name", "company", "channel", "contact", "segment", "notes"];
-  const patch: Record<string, string> = {};
-  for (const k of allowed) {
-    if (body[k] !== undefined) patch[k] = String(body[k]).trim();
-  }
-  const updated = await updateProspect(req.params.id, patch);
-  res.json({ prospect: updated });
-});
-
-outreach.delete("/prospects/:id", async (req, res) => {
-  const ok = await deleteProspect(req.params.id);
-  if (!ok) return sendError(res, 404, "not found");
-  res.json({ removed: true });
-});
-
-outreach.post("/prospects/:id/status", async (req, res) => {
-  const body = req.body ?? {};
-  const status = String(body.status ?? "");
-  if (!VALID_STATUS.includes(status as ProspectStatus)) {
-    return sendError(res, 400, "invalid status");
-  }
-  const updated = await setStatus(req.params.id, status as ProspectStatus, {
-    note: body.note,
-    value: body.value !== undefined ? Number(body.value) : undefined,
-  });
-  if (!updated) return sendError(res, 404, "not found");
-  res.json({ prospect: updated });
-});
-
-outreach.post("/prospects/:id/advance", async (req, res) => {
   const settings = await getSettings();
-  const updated = await advanceProspect(req.params.id, {
-    message: req.body?.message,
-    seq: settings.sequence,
+  const { sendWA } = await import("./services/waVerify");
+  const text = String(req.body?.message ?? cur.message ?? `Halo ${cur.name}, follow-up setelah balasan terakhir.`);
+  const dry = String(process.env.AUTOPILOT_DRY_RUN || "true").toLowerCase() === "true";
+  if (!dry) {
+    const ok = await sendWA(cur.phone628, text);
+    if (!ok) return sendError(res, 500, "gagal kirim WA");
+  }
+  await insertWebhookLog(cur.phone628, "followup_replied", { leadId: cur.id });
+  res.json({ ok: true, dry });
+}));
+
+outreach.get("/targets", async (req, res) => {
+  const status = typeof req.query.status === "string" ? req.query.status : undefined;
+  const targets = await getSearchTargets({ status, limit: 200 });
+  const counts = await countSearchTargets();
+  res.json({ targets, counts });
+});
+
+outreach.get("/raw-leads", async (req, res) => {
+  const city = typeof req.query.city === "string" ? req.query.city : undefined;
+  const category = typeof req.query.category === "string" ? req.query.category : undefined;
+  const leads = await getRawLeads({ city, category, limit: 100 });
+  res.json({ rawLeads: leads });
+});
+
+outreach.get("/scheduler/status", async (_req, res) => {
+  const nowWIB = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" }));
+  const todayStr = nowWIB.toISOString().slice(0,10);
+  const daily = await getDailyCount(todayStr);
+  const wibHour = nowWIB.getHours();
+  const isWeekday = nowWIB.getDay() !== 0 && nowWIB.getDay() !== 6;
+  const operational = isWeekday && wibHour >= 9 && wibHour < 16;
+  res.json({
+    dryRun: String(process.env.AUTOPILOT_DRY_RUN || "true").toLowerCase() === "true",
+    dailySent: daily,
+    dailyLimit: 10,
+    operational,
+    wibTime: nowWIB.toISOString(),
+    isWeekday,
   });
-  if (!updated) return sendError(res, 404, "not found");
-  res.json({ prospect: updated });
 });
 
-outreach.post("/prospects/:id/note", async (req, res) => {
-  if (!(await getProspect(req.params.id))) return sendError(res, 404, "not found");
-  await logNote(req.params.id, String(req.body?.note ?? ""));
-  res.json({ ok: true });
-});
-
-outreach.get("/prospects/:id/activities", async (req, res) => {
-  const activities = await getActivities(req.params.id);
-  res.json({ activities });
-});
-
-outreach.post("/prospects/:id/message", async (req, res) => {
-  const [p, settings] = await Promise.all([
-    getProspect(req.params.id),
-    getSettings(),
-  ]);
-  if (!p) return sendError(res, 404, "not found");
-  const step =
-    typeof req.body?.step === "number" && req.body.step >= 0
-      ? Math.min(req.body.step, settings.sequence.length - 1)
-      : Math.min(p.followUpStep, settings.sequence.length - 1);
-  const { message, usedAI } = await generateMessage(p, settings, step);
-  res.json({ message, step, usedAI });
-});
+// Admin: seeding & scrape trigger
+outreach.post("/admin/seed", h(async (_req, res) => {
+  const result = await seedSearchTargets();
+  res.json(result);
+}));
+outreach.post("/admin/scrape-next", h(async (_req, res) => {
+  const result = await processNextTarget();
+  res.json(result);
+}));
 
 outreach.get("/settings", async (_req, res) => {
   const settings = await getSettings();
@@ -329,6 +318,41 @@ outreach.post("/settings", async (req, res) => {
 });
 
 app.use("/api/apps/outreach", outreach);
+
+// Webhook 24/7 (no platform auth, secret check)
+app.post("/api/webhooks/wa", async (req, res) => {
+  const secret = process.env.WA_WEBHOOK_SECRET;
+  if (secret) {
+    const hdr = String(req.headers["x-api-key"] ?? req.headers["x-webhook-secret"] ?? "");
+    if (hdr !== secret) {
+      // allow Evolution without secret if not set, but if set must match
+      const isEvolution = req.headers["apikey"] !== undefined;
+      if (!isEvolution) return sendError(res, 401, "invalid webhook secret");
+    }
+  }
+  const body = req.body ?? {};
+  // Evolution payload variants
+  const phoneRaw = body.phone || body.number || body?.data?.key?.remoteJid || body?.data?.pushName || "";
+  let phoneDigits = String(phoneRaw).replace(/[^0-9]/g, "");
+  if (phoneDigits.startsWith("0")) phoneDigits = "62" + phoneDigits.slice(1);
+  if (phoneDigits.startsWith("8")) phoneDigits = "62" + phoneDigits;
+  // try extract from remoteJid like 628xxx@s.whatsapp.net
+  const jid = String(body?.data?.key?.remoteJid ?? "");
+  if (jid.includes("@")) {
+    const p = jid.split("@")[0].replace(/[^0-9]/g, "");
+    if (p) phoneDigits = p;
+  }
+  const messageText = body.message || body.text || body?.data?.message?.conversation || body?.data?.message?.extendedTextMessage?.text || "";
+  if (!phoneDigits) return res.json({ ok: true });
+  const qualified = await findQualifiedByPhone(phoneDigits);
+  if (qualified && qualified.status === "Contacted") {
+    await updateQualifiedLead(qualified.id, { status: "Replied", repliedAt: new Date().toISOString() } as never);
+    await insertWebhookLog(phoneDigits, "replied", body);
+  } else {
+    await insertWebhookLog(phoneDigits, "unmatched", body);
+  }
+  res.json({ ok: true });
+});
 
 /* ---------- Cash Flow app ---------- */
 
@@ -728,4 +752,5 @@ app.use(
 
 app.listen(PORT, () => {
   console.log(`Bearich Outreach API berjalan di http://localhost:${PORT}`);
+  try { startScheduler(); console.log("Scheduler autopilot aktif (dryRun=" + process.env.AUTOPILOT_DRY_RUN + ")"); } catch {}
 });

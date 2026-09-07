@@ -117,3 +117,79 @@ CREATE TABLE IF NOT EXISTS tasks (
   INDEX idx_status (status),
   INDEX idx_due (due_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Autopilot: Fase 0 target generator (10.280 kombinasi)
+CREATE TABLE IF NOT EXISTS search_targets (
+  id VARCHAR(40) PRIMARY KEY,
+  keyword VARCHAR(255) NOT NULL,
+  city VARCHAR(100) NOT NULL,
+  category VARCHAR(100) NOT NULL,
+  status ENUM('PENDING','PROCESSING','DONE','FAILED') NOT NULL DEFAULT 'PENDING',
+  attempts INT NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at DATETIME(3) NOT NULL,
+  updated_at DATETIME(3) NOT NULL,
+  UNIQUE KEY uq_keyword (keyword),
+  INDEX idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Fase 1 raw leads (dedup place_id)
+CREATE TABLE IF NOT EXISTS raw_leads (
+  id VARCHAR(40) PRIMARY KEY,
+  place_id VARCHAR(100) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  address TEXT,
+  phone_raw VARCHAR(50) DEFAULT '',
+  website VARCHAR(255) DEFAULT '',
+  rating DECIMAL(2,1) NULL,
+  review_count INT NOT NULL DEFAULT 0,
+  maps_status ENUM('OPERATIONAL','CLOSED_PERMANENTLY','UNKNOWN') NOT NULL DEFAULT 'UNKNOWN',
+  city VARCHAR(100) NOT NULL DEFAULT '',
+  category VARCHAR(100) NOT NULL DEFAULT '',
+  keyword VARCHAR(255) NOT NULL DEFAULT '',
+  raw_json JSON,
+  created_at DATETIME(3) NOT NULL,
+  last_seen_at DATETIME(3) NOT NULL,
+  UNIQUE KEY uq_place (place_id),
+  INDEX idx_city_cat (city, category)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Fase 3 qualified leads (buffer)
+CREATE TABLE IF NOT EXISTS qualified_leads (
+  id VARCHAR(40) PRIMARY KEY,
+  place_id VARCHAR(100) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  company VARCHAR(255) NOT NULL DEFAULT '',
+  phone_628 VARCHAR(20) NOT NULL,
+  city VARCHAR(100) NOT NULL DEFAULT '',
+  category VARCHAR(100) NOT NULL DEFAULT '',
+  rating DECIMAL(2,1) NULL,
+  review_count INT NOT NULL DEFAULT 0,
+  website VARCHAR(255) DEFAULT '',
+  score INT NOT NULL,
+  wa_verified TINYINT(1) NOT NULL DEFAULT 0,
+  message TEXT,
+  message_variants JSON,
+  status ENUM('New Lead','Contacted','Replied') NOT NULL DEFAULT 'New Lead',
+  created_at DATETIME(3) NOT NULL,
+  contacted_at DATETIME(3) NULL,
+  replied_at DATETIME(3) NULL,
+  UNIQUE KEY uq_place (place_id),
+  UNIQUE KEY uq_phone (phone_628),
+  INDEX idx_status (status),
+  INDEX idx_score (score)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS webhook_logs (
+  id VARCHAR(40) PRIMARY KEY,
+  phone_628 VARCHAR(20) NOT NULL DEFAULT '',
+  event VARCHAR(50) NOT NULL DEFAULT '',
+  payload JSON,
+  created_at DATETIME(3) NOT NULL,
+  INDEX idx_phone (phone_628)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS outreach_daily_counter (
+  date DATE PRIMARY KEY,
+  count INT NOT NULL DEFAULT 0
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
