@@ -193,3 +193,16 @@ CREATE TABLE IF NOT EXISTS outreach_daily_counter (
   date DATE PRIMARY KEY,
   count INT NOT NULL DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Antrian tunda verifikasi WA (gateway error/timeout): bukan qualified, dicoba lagi
+CREATE TABLE IF NOT EXISTS wa_verify_pending (
+  place_id VARCHAR(100) PRIMARY KEY,
+  phone_628 VARCHAR(20) NOT NULL,
+  name VARCHAR(255) NOT NULL DEFAULT '',
+  city VARCHAR(100) NOT NULL DEFAULT '',
+  category VARCHAR(100) NOT NULL DEFAULT '',
+  attempts INT NOT NULL DEFAULT 0,
+  next_retry_at DATETIME(3) NOT NULL,
+  created_at DATETIME(3) NOT NULL,
+  INDEX idx_retry (next_retry_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

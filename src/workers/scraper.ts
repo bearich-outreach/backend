@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { upsertRawLead, claimNextSearchTarget, updateSearchTarget, getQualifiedLeads } from "../db";
+import { upsertRawLead, claimNextSearchTarget, updateSearchTarget, getQualifiedLeads, upsertWaPending, getDueWaPending, deleteWaPending } from "../db";
 import { normalizePhone, isClosedStatus } from "../services/cleansing";
 import { scoreLead } from "../services/scoring";
 import { verifyWA } from "../services/waVerify";
@@ -64,7 +64,23 @@ async function scrapeKeyword(keyword: string, city: string, category: string): P
   return leads;
 }
 
-export async function processNextTarget(): Promise<{ keyword?: string; rawCount?: number; qualifiedCount?: number; captcha?: boolean }> {
+export async function processNextTarget(): Promise<{ keyword?: string; rawCount?: number; qualifiedCount?: number; captcha?: boolean; retried?: number }> {
+  // 1) Retry antrian tunda verifikasi WA dulu (gateway error sebelumnya)
+  let retried = 0;
+  try {
+    const due = await getDueWaPending(20);
+    for (const p of due) {
+      const waStatus = await verifyWA(p.phone_628);
+      if (waStatus === null) {
+        await upsertWaPending({ placeId: p.place_id, phone628: p.phone_628, name: p.name, city: p.city, category: p.category });
+        continue;
+      }
+      if (waStatus === false) { await deleteWaPending(p.place_id); continue; } // WA tidak aktif -> buang dari antrian, tidak jadi qualified
+      await deleteWaPending(p.place_id);
+      retried++;
+      // detail raw lengkap akan masuk lewat scrape berikutnya; pending hanya menandai nomor sudah aktif
+    }
+  } catch { /* retry best-effort, lanjut ke scrape */ }
   const target = await claimNextSearchTarget();
   if (!target) return {};
   try {
@@ -82,9 +98,15 @@ export async function processNextTarget(): Promise<{ keyword?: string; rawCount?
       const preliminary = scoreLead(raw, false);
       // need >55 to even verify WA
       if (preliminary < 35) continue; // low value skip to save verify calls
-      const waVerified = await verifyWA(phone628);
-      const total = scoreLead(raw, waVerified);
+      const waStatus = await verifyWA(phone628);
       await upsertRawLead(raw);
+      if (waStatus === null) {
+        // Gateway error/timeout: tunda, masuk antrian retry — BUKAN qualified
+        await upsertWaPending({ placeId: raw.placeId, phone628, name: raw.name, city: raw.city, category: raw.category });
+        continue;
+      }
+      if (waStatus === false) continue; // WA tidak aktif / tidak lolos verifikasi -> bukan qualified
+      const total = scoreLead(raw, true);
       if (total >= 70) {
         const { message, variants } = await generateQualifiedMessage(raw, settings);
         await insertQualifiedLead({
@@ -99,7 +121,7 @@ export async function processNextTarget(): Promise<{ keyword?: string; rawCount?
           reviewCount: raw.reviewCount,
           website: raw.website,
           score: total,
-          waVerified,
+          waVerified: true,
           message,
           messageVariants: variants,
           status: "New Lead",
@@ -114,7 +136,7 @@ export async function processNextTarget(): Promise<{ keyword?: string; rawCount?
 
     // auto-refill check: if New Lead <10, next target will be claimed on next cron, not here to avoid loop
 
-    return { keyword: target.keyword, rawCount: rawLeads.length, qualifiedCount: qualified };
+    return { keyword: target.keyword, rawCount: rawLeads.length, qualifiedCount: qualified, retried };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const captcha = /captcha/i.test(msg);

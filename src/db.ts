@@ -517,6 +517,19 @@ export async function ensureSchema(): Promise<void> {
         count INT NOT NULL DEFAULT 0
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS wa_verify_pending (
+        place_id VARCHAR(100) PRIMARY KEY,
+        phone_628 VARCHAR(20) NOT NULL,
+        name VARCHAR(255) NOT NULL DEFAULT '',
+        city VARCHAR(100) NOT NULL DEFAULT '',
+        category VARCHAR(100) NOT NULL DEFAULT '',
+        attempts INT NOT NULL DEFAULT 0,
+        next_retry_at DATETIME(3) NOT NULL,
+        created_at DATETIME(3) NOT NULL,
+        INDEX idx_retry (next_retry_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
   } finally {
     conn.release();
   }
@@ -1750,11 +1763,12 @@ function rowToQualifiedLead(r: QualifiedLeadRow): QualifiedLead {
     id: r.id, placeId: r.place_id, name: r.name, company: r.company ?? undefined, phone628: r.phone_628, city: r.city ?? undefined, category: r.category ?? undefined, rating: r.rating == null ? undefined : Number(r.rating), reviewCount: Number(r.review_count), website: r.website ?? undefined, score: Number(r.score), waVerified: Boolean(r.wa_verified), message: r.message ?? undefined, messageVariants: parseJson<string[] | undefined>(r.message_variants, undefined), status: r.status, createdAt: fromMysql(r.created_at) ?? todayISO(), contactedAt: fromMysql(r.contacted_at ?? undefined), repliedAt: fromMysql(r.replied_at ?? undefined),
   };
 }
-export async function getQualifiedLeads(opts: { status?: string; limit?: number } = {}) {
+export async function getQualifiedLeads(opts: { status?: string; limit?: number; waVerifiedOnly?: boolean } = {}) {
   const conn = await getConn();
   try {
     const where: string[] = []; const params: unknown[] = [];
     if (opts.status) { where.push("status = ?"); params.push(opts.status); }
+    if (opts.waVerifiedOnly !== false) { where.push("wa_verified = 1"); }
     const lim = Math.min(Math.max(Number(opts.limit) || 100, 1), 1000);
     const sql = "SELECT * FROM qualified_leads" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY score DESC, created_at DESC LIMIT " + lim;
     const [rows] = await conn.query<QualifiedLeadRow[]>(sql, params);
@@ -1775,6 +1789,8 @@ export async function countQualifiedLeads() {
   } finally { conn.release(); }
 }
 export async function insertQualifiedLead(l: QualifiedLead) {
+  // Guard: WA tidak aktif / belum terverifikasi tidak boleh masuk qualified
+  if (!l.waVerified) return;
   const conn = await getConn();
   try {
     await conn.query(
@@ -1800,6 +1816,54 @@ export async function updateQualifiedLead(id: string, patch: Partial<QualifiedLe
 export async function findQualifiedByPhone(phone628: string) {
   const conn = await getConn();
   try { const [rows] = await conn.query<QualifiedLeadRow[]>("SELECT * FROM qualified_leads WHERE phone_628=? LIMIT 1", [phone628]); return rows.length ? rowToQualifiedLead(rows[0]) : undefined; } finally { conn.release(); }
+}
+
+// Antrian tunda verifikasi WA (gateway error/timeout -> null): dicoba lagi di run berikutnya / manual.
+export interface WaPendingRow { place_id: string; phone_628: string; name: string; city: string; category: string; attempts: number; next_retry_at: string; created_at: string; }
+export async function upsertWaPending(p: { placeId: string; phone628: string; name?: string; city?: string; category?: string }) {
+  const conn = await getConn();
+  try {
+    const now = todayISO();
+    const next = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    await conn.query(
+      `INSERT INTO wa_verify_pending (place_id, phone_628, name, city, category, attempts, next_retry_at, created_at)
+       VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+       ON DUPLICATE KEY UPDATE phone_628=VALUES(phone_628), attempts=attempts+1, next_retry_at=VALUES(next_retry_at)`,
+      [p.placeId, p.phone628, p.name ?? "", p.city ?? "", p.category ?? "", toMysql(next), toMysql(now)]
+    );
+  } finally { conn.release(); }
+}
+export async function getDueWaPending(limit = 20) {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<(WaPendingRow & RowDataPacket)[]>(
+      "SELECT * FROM wa_verify_pending WHERE next_retry_at <= NOW(3) ORDER BY next_retry_at ASC LIMIT " + Math.min(Math.max(Number(limit) || 20, 1), 100)
+    );
+    return rows;
+  } finally { conn.release(); }
+}
+export async function deleteWaPending(placeId: string) {
+  const conn = await getConn();
+  try { await conn.query("DELETE FROM wa_verify_pending WHERE place_id=?", [placeId]); } finally { conn.release(); }
+}
+export async function countWaPending() {
+  const conn = await getConn();
+  try { const [r] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM wa_verify_pending"); return Number(r[0]?.total ?? 0); } finally { conn.release(); }
+}
+// Arsip satu-kali: pindahkan qualified lama yang wa_verified=0 ke pending + pastikan raw ada, lalu hapus dari qualified.
+export async function archiveUnverifiedQualified(): Promise<{ archived: number }> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<QualifiedLeadRow[]>("SELECT * FROM qualified_leads WHERE wa_verified=0");
+    let archived = 0;
+    for (const r of rows) {
+      const ql = rowToQualifiedLead(r);
+      await upsertWaPending({ placeId: ql.placeId, phone628: ql.phone628, name: ql.name, city: ql.city, category: ql.category });
+      await conn.query("DELETE FROM qualified_leads WHERE id=?", [ql.id]);
+      archived++;
+    }
+    return { archived };
+  } finally { conn.release(); }
 }
 
 export async function insertWebhookLog(phone628: string, event: string, payload: unknown) {

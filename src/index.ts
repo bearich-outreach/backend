@@ -11,9 +11,11 @@ import {
   verifyToken,
 } from "./auth";
 import {
+  archiveUnverifiedQualified,
   countQualifiedLeads,
   countRawLeads,
   countSearchTargets,
+  countWaPending,
   createTransfer,
   deleteAccount,
   deleteNote,
@@ -31,6 +33,7 @@ import {
   getNoteTags,
   getQualifiedLead,
   getQualifiedLeads,
+  getDueWaPending,
   getRawLeads,
   getSearchTargets,
   getSettings,
@@ -211,6 +214,7 @@ outreach.get("/queue", async (_req, res) => {
 
 outreach.get("/leads", async (req, res) => {
   const status = String(req.query.status ?? "");
+  // Semua qualified dijamin wa_verified=1 (lihat scraper gate + guard insert).
   const leads = await getQualifiedLeads({ status: status || undefined, limit: 200 });
   res.json({ leads });
 });
@@ -297,6 +301,29 @@ outreach.post("/admin/seed", h(async (_req, res) => {
 outreach.post("/admin/scrape-next", h(async (_req, res) => {
   const result = await processNextTarget();
   res.json(result);
+}));
+// Arsip satu-kali: qualified lama wa_verified=0 -> pending retry (tidak dihapus permanen tanpa jejak)
+outreach.post("/admin/archive-unverified", h(async (_req, res) => {
+  const result = await archiveUnverifiedQualified();
+  res.json(result);
+}));
+outreach.get("/wa-pending", h(async (_req, res) => {
+  const [pending, count] = await Promise.all([getDueWaPending(100), countWaPending()]);
+  res.json({ pending, count });
+}));
+// Verifikasi ulang manual untuk antrian tunda (gateway pernah error)
+outreach.post("/wa-pending/reverify", h(async (_req, res) => {
+  const { verifyWA } = await import("./services/waVerify");
+  const { deleteWaPending } = await import("./db");
+  const due = await getDueWaPending(50);
+  let verified = 0, inactive = 0, stillPending = 0;
+  for (const p of due) {
+    const s = await verifyWA(p.phone_628);
+    if (s === true) { await deleteWaPending(p.place_id); verified++; }
+    else if (s === false) { await deleteWaPending(p.place_id); inactive++; }
+    else stillPending++;
+  }
+  res.json({ checked: due.length, verified, inactive, stillPending });
 }));
 
 outreach.get("/settings", async (_req, res) => {
