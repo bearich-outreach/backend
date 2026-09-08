@@ -239,6 +239,7 @@ export interface Task {
   status: TaskStatus;
   priority: TaskPriority;
   dueDate?: string;
+  sortOrder: number;
   createdAt: string;
   updatedAt: string;
   completedAt?: string;

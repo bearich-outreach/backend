@@ -337,6 +337,7 @@ export async function ensureSchema(): Promise<void> {
         status VARCHAR(20) NOT NULL DEFAULT 'todo',
         priority VARCHAR(10) NOT NULL DEFAULT 'medium',
         due_date DATE NULL,
+        sort_order INT NOT NULL DEFAULT 0,
         created_at DATETIME(3) NOT NULL,
         updated_at DATETIME(3) NOT NULL,
         completed_at DATETIME(3) NULL,
@@ -344,6 +345,12 @@ export async function ensureSchema(): Promise<void> {
         INDEX idx_due (due_date)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+    try {
+      await conn.query("ALTER TABLE tasks ADD COLUMN sort_order INT NOT NULL DEFAULT 0");
+      // Kolom baru dibuat -> backfill sekali dari urutan prioritas + tenggat.
+      // idempotent: hanya jalan saat ALTER sukses (tabel lama tanpa kolom).
+      await backfillTaskSortOrder(conn);
+    } catch { /* kolom sudah ada, urutan manual dipertahankan */ }
 
     const [existing] = await conn.query<RowDataPacket[]>(
       "SELECT id FROM settings WHERE id = 1"
@@ -1501,6 +1508,7 @@ interface TaskRow extends RowDataPacket {
   status: TaskStatus;
   priority: TaskPriority;
   due_date: string | null;
+  sort_order: number | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -1520,10 +1528,67 @@ function rowToTask(row: TaskRow): Task {
     status: row.status,
     priority: row.priority,
     dueDate: row.due_date ?? undefined,
+    sortOrder: Number(row.sort_order ?? 0),
     createdAt: fromMysql(row.created_at) ?? todayISO(),
     updatedAt: fromMysql(row.updated_at) ?? todayISO(),
     completedAt: row.completed_at ? fromMysql(row.completed_at) : undefined,
   };
+}
+
+const TASK_PRIORITY_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+
+// Backfill satu-kali: urutan awal = prioritas high->low, lalu tenggat terdekat.
+async function backfillTaskSortOrder(conn: PoolConnection): Promise<void> {
+  const [rows] = await conn.query<TaskRow[]>(
+    "SELECT id FROM tasks WHERE status != 'done' ORDER BY FIELD(priority,'high','medium','low'), due_date IS NULL ASC, due_date ASC, created_at ASC"
+  );
+  for (let i = 0; i < rows.length; i++) {
+    await conn.query("UPDATE tasks SET sort_order = ? WHERE id = ?", [i, rows[i].id]);
+  }
+}
+
+export async function getActiveTasksSorted(): Promise<Task[]> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<TaskRow[]>("SELECT * FROM tasks WHERE status != 'done' ORDER BY sort_order ASC");
+    return rows.map(rowToTask);
+  } finally { conn.release(); }
+}
+
+// Posisi sisip otomatis: prioritas high->low, lalu tenggat terdekat (tanpa tanggal = paling belakang).
+export function autoInsertIndex(
+  list: { priority: string; dueDate?: string }[],
+  priority: string,
+  dueDate?: string
+): number {
+  const rank = (p: string) => TASK_PRIORITY_RANK[p] ?? 1;
+  const time = (d?: string) => (d ? new Date(d + "T00:00:00").getTime() : Number.POSITIVE_INFINITY);
+  const idx = list.findIndex(
+    (t) => rank(priority) < rank(t.priority) || (rank(priority) === rank(t.priority) && time(dueDate) < time(t.dueDate))
+  );
+  return idx === -1 ? list.length : idx;
+}
+
+export async function shiftActiveSortOrders(from: number): Promise<void> {
+  const conn = await getConn();
+  try {
+    await conn.query("UPDATE tasks SET sort_order = sort_order + 1 WHERE status != 'done' AND sort_order >= ?", [from]);
+  } finally { conn.release(); }
+}
+
+// Tulis ulang urutan manual baris aktif. Menolak subset (filter aktif) agar tidak korup.
+export async function reorderActiveTasks(orderedIds: string[]): Promise<void> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<TaskRow[]>("SELECT id FROM tasks WHERE status != 'done'");
+    const activeIds = new Set(rows.map((r) => r.id));
+    if (orderedIds.length !== activeIds.size || !orderedIds.every((id) => activeIds.has(id))) {
+      throw new Error("daftar id tidak cocok dengan seluruh tugas aktif (nonaktifkan filter dulu)");
+    }
+    for (let i = 0; i < orderedIds.length; i++) {
+      await conn.query("UPDATE tasks SET sort_order = ? WHERE id = ?", [i, orderedIds[i]]);
+    }
+  } finally { conn.release(); }
 }
 
 export async function getTasks(opts: {
@@ -1556,7 +1621,7 @@ export async function getTasks(opts: {
     const sql =
       "SELECT * FROM tasks" +
       (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
-      " ORDER BY (status = 'done') ASC, due_date IS NULL ASC, due_date ASC, created_at DESC";
+      " ORDER BY (status = 'done') ASC, CASE WHEN status = 'done' THEN 0 ELSE sort_order END ASC, completed_at DESC, due_date IS NULL ASC, due_date ASC, created_at DESC";
     const [rows] = await conn.query<TaskRow[]>(sql, params);
     return rows.map(rowToTask);
   } finally {
@@ -1578,8 +1643,8 @@ export async function insertTask(t: Task): Promise<Task> {
   const conn = await getConn();
   try {
     await conn.query(
-      `INSERT INTO tasks (id, title, description, status, priority, due_date, created_at, updated_at, completed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (id, title, description, status, priority, due_date, sort_order, created_at, updated_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         t.id,
         t.title,
@@ -1587,6 +1652,7 @@ export async function insertTask(t: Task): Promise<Task> {
         t.status,
         t.priority,
         dateToSql(t.dueDate),
+        t.sortOrder ?? 0,
         toMysql(t.createdAt),
         toMysql(t.updatedAt),
         toMysql(t.completedAt),
@@ -1609,7 +1675,7 @@ export async function updateTask(
     const merged = { ...current, ...patch, updatedAt: todayISO() };
     await conn.query(
       `UPDATE tasks SET
-        title = ?, description = ?, status = ?, priority = ?, due_date = ?, updated_at = ?, completed_at = ?
+        title = ?, description = ?, status = ?, priority = ?, due_date = ?, sort_order = ?, updated_at = ?, completed_at = ?
        WHERE id = ?`,
       [
         merged.title,
@@ -1617,6 +1683,7 @@ export async function updateTask(
         merged.status,
         merged.priority,
         dateToSql(merged.dueDate),
+        merged.sortOrder ?? 0,
         toMysql(merged.updatedAt),
         toMysql(merged.completedAt),
         id,

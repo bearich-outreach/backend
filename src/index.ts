@@ -12,6 +12,7 @@ import {
 } from "./auth";
 import {
   archiveUnverifiedQualified,
+  autoInsertIndex,
   countQualifiedLeads,
   countQualifiedLeadsFiltered,
   countRawLeads,
@@ -27,6 +28,7 @@ import {
   findQualifiedByPhone,
   getAccount,
   getAccounts,
+  getActiveTasksSorted,
   getApps,
   getCashflowSettings,
   getCashflowSummary,
@@ -54,10 +56,12 @@ import {
   PAGE_SIZE,
   parsePage,
   pageOffset,
+  reorderActiveTasks,
   resetOutreachData,
   retryFailedTargets,
   saveCashflowSettings,
   saveSettings,
+  shiftActiveSortOrders,
   updateAccount,
   updateNote,
   updateQualifiedLead,
@@ -817,19 +821,43 @@ tasks.post("/tasks", h(async (req, res) => {
     : "medium";
   const now = todayISO();
   const due = String(body.dueDate ?? "").slice(0, 10);
+  const dueDate = /^\d{4}-\d{2}-\d{2}$/.test(due) ? due : undefined;
+  // Tugas aktif baru disisipkan otomatis by prioritas + tenggat (bukan ditempel di ujung).
+  let sortOrder = 0;
+  if (status !== "done") {
+    const active = await getActiveTasksSorted();
+    sortOrder = autoInsertIndex(active, priority, dueDate);
+    await shiftActiveSortOrders(sortOrder);
+  }
   const task: Task = {
     id: uid("tsk_"),
     title,
     description: body.description !== undefined ? String(body.description) : undefined,
     status,
     priority,
-    dueDate: /^\d{4}-\d{2}-\d{2}$/.test(due) ? due : undefined,
+    dueDate,
+    sortOrder,
     createdAt: now,
     updatedAt: now,
     completedAt: status === "done" ? now : undefined,
   };
   await insertTask(task);
   res.status(201).json({ task });
+}));
+
+tasks.post("/reorder", h(async (req, res) => {
+  // Tulis ulang urutan manual baris aktif. Wajib daftar LENGKAP (tanpa filter).
+  const ids = req.body?.orderedIds;
+  if (!Array.isArray(ids) || ids.some((x) => typeof x !== "string")) {
+    return sendError(res, 400, "orderedIds harus array string id");
+  }
+  try {
+    await reorderActiveTasks(ids as string[]);
+  } catch (e) {
+    return sendError(res, 400, e instanceof Error ? e.message : "gagal reorder");
+  }
+  const taskList = await getTasks({});
+  res.json({ tasks: taskList });
 }));
 
 tasks.get("/tasks/:id", h(async (req, res) => {
@@ -861,6 +889,17 @@ tasks.patch("/tasks/:id", h(async (req, res) => {
   }
   if (patch.status !== undefined) {
     patch.completedAt = patch.status === "done" ? todayISO() : undefined;
+    // Reopen done -> aktif: sisipkan by aturan prioritas + tenggat.
+    if (patch.status !== "done" && current.status === "done") {
+      const active = await getActiveTasksSorted();
+      const pos = autoInsertIndex(
+        active,
+        (patch.priority as Task["priority"]) ?? current.priority,
+        patch.dueDate !== undefined ? patch.dueDate : current.dueDate
+      );
+      await shiftActiveSortOrders(pos);
+      patch.sortOrder = pos;
+    }
   }
   const updated = await updateTask(req.params.id, patch);
   res.json({ task: updated });
