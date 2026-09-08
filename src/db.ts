@@ -31,6 +31,16 @@ import {
 import { todayISO, uid } from "./store";
 import { hashPassword, randomSecret } from "./auth";
 
+// Pagination: tetap 10 baris per halaman di semua daftar.
+export const PAGE_SIZE = 10;
+export function parsePage(value: unknown): number {
+  const p = Number(value);
+  return Number.isFinite(p) && p >= 1 ? Math.floor(p) : 1;
+}
+export function pageOffset(page: number, pageSize = PAGE_SIZE): number {
+  return (Math.max(page, 1) - 1) * pageSize;
+}
+
 const DEFAULTS = {
   businessName: "Bearich Studio",
   services: [
@@ -927,7 +937,7 @@ function monthRange(
   };
 }
 
-export async function getTransactions(opts: {
+export interface TransactionFilter {
   month?: string;
   date?: string;
   startDate?: string;
@@ -935,53 +945,84 @@ export async function getTransactions(opts: {
   type?: string;
   category?: string;
   account?: string;
+}
+
+function buildTransactionWhere(opts: TransactionFilter): { where: string[]; params: (string | number)[] } {
+  const where: string[] = [];
+  const params: (string | number)[] = [];
+  if (opts.startDate || opts.endDate) {
+    let sd = opts.startDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.startDate) ? opts.startDate : null;
+    let ed = opts.endDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.endDate) ? opts.endDate : null;
+    if (sd && ed) {
+      if (sd > ed) [sd, ed] = [ed, sd];
+      where.push("txn_date >= ? AND txn_date <= ?");
+      params.push(sd, ed);
+    } else if (sd) {
+      where.push("txn_date = ?");
+      params.push(sd);
+    } else if (ed) {
+      where.push("txn_date = ?");
+      params.push(ed);
+    }
+  } else if (opts.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date)) {
+    where.push("txn_date = ?");
+    params.push(opts.date);
+  } else if (opts.month) {
+    const range = monthRange(opts.month);
+    if (range) {
+      where.push("txn_date >= ? AND txn_date < ?");
+      params.push(range.start, range.end);
+    }
+  }
+  if (opts.type === "in" || opts.type === "out") {
+    where.push("type = ?");
+    params.push(opts.type);
+  }
+  if (opts.category) {
+    where.push("category = ?");
+    params.push(opts.category);
+  }
+  if (opts.account) {
+    where.push("account = ?");
+    params.push(opts.account);
+  }
+  return { where, params };
+}
+
+export async function getTransactions(opts: TransactionFilter & {
+  limit?: number;
+  offset?: number;
 } = {}): Promise<Transaction[]> {
   const conn = await getConn();
   try {
-    const where: string[] = [];
-    const params: (string | number)[] = [];
-    if (opts.startDate || opts.endDate) {
-      let sd = opts.startDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.startDate) ? opts.startDate : null;
-      let ed = opts.endDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.endDate) ? opts.endDate : null;
-      if (sd && ed) {
-        if (sd > ed) [sd, ed] = [ed, sd];
-        where.push("txn_date >= ? AND txn_date <= ?");
-        params.push(sd, ed);
-      } else if (sd) {
-        where.push("txn_date = ?");
-        params.push(sd);
-      } else if (ed) {
-        where.push("txn_date = ?");
-        params.push(ed);
-      }
-    } else if (opts.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date)) {
-      where.push("txn_date = ?");
-      params.push(opts.date);
-    } else if (opts.month) {
-      const range = monthRange(opts.month);
-      if (range) {
-        where.push("txn_date >= ? AND txn_date < ?");
-        params.push(range.start, range.end);
-      }
-    }
-    if (opts.type === "in" || opts.type === "out") {
-      where.push("type = ?");
-      params.push(opts.type);
-    }
-    if (opts.category) {
-      where.push("category = ?");
-      params.push(opts.category);
-    }
-    if (opts.account) {
-      where.push("account = ?");
-      params.push(opts.account);
-    }
+    const { where, params } = buildTransactionWhere(opts);
+    const lim = Math.min(Math.max(Math.floor(Number(opts.limit) || 5000), 1), 5000);
+    const off = Math.max(Math.floor(Number(opts.offset) || 0), 0);
     const sql =
       "SELECT * FROM transactions" +
       (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
-      " ORDER BY txn_date DESC, created_at DESC";
+      " ORDER BY txn_date DESC, created_at DESC LIMIT " + lim + " OFFSET " + off;
     const [rows] = await conn.query<TransactionRow[]>(sql, params);
     return rows.map(rowToTransaction);
+  } finally {
+    conn.release();
+  }
+}
+
+// Total + nominal (in/out) dihitung server dari SELURUH data terfilter, bukan halaman aktif.
+export async function countTransactionsFiltered(opts: TransactionFilter = {}): Promise<{ total: number; totalIn: number; totalOut: number }> {
+  const conn = await getConn();
+  try {
+    const { where, params } = buildTransactionWhere(opts);
+    const sql =
+      "SELECT COUNT(*) total, COALESCE(SUM(CASE WHEN type='in' THEN amount ELSE 0 END),0) totalIn, COALESCE(SUM(CASE WHEN type='out' THEN amount ELSE 0 END),0) totalOut FROM transactions" +
+      (where.length ? ` WHERE ${where.join(" AND ")}` : "");
+    const [rows] = await conn.query<RowDataPacket[]>(sql, params);
+    return {
+      total: Number(rows[0]?.total ?? 0),
+      totalIn: Number(rows[0]?.totalIn ?? 0),
+      totalOut: Number(rows[0]?.totalOut ?? 0),
+    };
   } finally {
     conn.release();
   }
@@ -1662,14 +1703,15 @@ function rowToSearchTarget(r: SearchTargetRow): import("./types").SearchTarget {
     updatedAt: fromMysql(r.updated_at) ?? todayISO(),
   };
 }
-export async function getSearchTargets(opts: { status?: string; limit?: number } = {}) {
+export async function getSearchTargets(opts: { status?: string; limit?: number; offset?: number } = {}) {
   const conn = await getConn();
   try {
     const where: string[] = [];
     const params: unknown[] = [];
     if (opts.status) { where.push("status = ?"); params.push(opts.status); }
-    const limit = Math.min(Math.max(Number(opts.limit) || 100, 1), 1000);
-    const sql = "SELECT * FROM search_targets" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY created_at ASC LIMIT " + limit;
+    const limit = Math.min(Math.max(Math.floor(Number(opts.limit) || 100), 1), 1000);
+    const off = Math.max(Math.floor(Number(opts.offset) || 0), 0);
+    const sql = "SELECT * FROM search_targets" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY created_at ASC LIMIT " + limit + " OFFSET " + off;
     const [rows] = await conn.query<SearchTargetRow[]>(sql, params);
     return rows.map(rowToSearchTarget);
   } finally { conn.release(); }
@@ -1753,16 +1795,28 @@ export async function upsertRawLead(lead: RawLead) {
     );
   } finally { conn.release(); }
 }
-export async function getRawLeads(opts: { city?: string; category?: string; limit?: number } = {}) {
+export async function getRawLeads(opts: { city?: string; category?: string; limit?: number; offset?: number } = {}) {
   const conn = await getConn();
   try {
     const where: string[] = []; const params: unknown[] = [];
     if (opts.city) { where.push("city = ?"); params.push(opts.city); }
     if (opts.category) { where.push("category = ?"); params.push(opts.category); }
-    const lim = Math.min(Math.max(Number(opts.limit) || 50, 1), 500);
-    const sql = "SELECT * FROM raw_leads" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY last_seen_at DESC LIMIT " + lim;
+    const lim = Math.min(Math.max(Math.floor(Number(opts.limit) || 50), 1), 500);
+    const off = Math.max(Math.floor(Number(opts.offset) || 0), 0);
+    const sql = "SELECT * FROM raw_leads" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY last_seen_at DESC LIMIT " + lim + " OFFSET " + off;
     const [rows] = await conn.query<RawLeadRow[]>(sql, params);
     return rows.map(rowToRawLead);
+  } finally { conn.release(); }
+}
+export async function countRawLeadsFiltered(opts: { city?: string; category?: string } = {}) {
+  const conn = await getConn();
+  try {
+    const where: string[] = []; const params: unknown[] = [];
+    if (opts.city) { where.push("city = ?"); params.push(opts.city); }
+    if (opts.category) { where.push("category = ?"); params.push(opts.category); }
+    const sql = "SELECT COUNT(*) total FROM raw_leads" + (where.length ? " WHERE " + where.join(" AND ") : "");
+    const [r] = await conn.query<RowDataPacket[]>(sql, params);
+    return Number(r[0]?.total ?? 0);
   } finally { conn.release(); }
 }
 export async function countRawLeads() {
@@ -1778,16 +1832,28 @@ function rowToQualifiedLead(r: QualifiedLeadRow): QualifiedLead {
     id: r.id, placeId: r.place_id, name: r.name, company: r.company ?? undefined, address: r.address ?? undefined, phone628: r.phone_628, city: r.city ?? undefined, category: r.category ?? undefined, rating: r.rating == null ? undefined : Number(r.rating), reviewCount: Number(r.review_count), website: r.website ?? undefined, mapsUrl: r.maps_url ?? undefined, score: Number(r.score), waVerified: Boolean(r.wa_verified), message: r.message ?? undefined, messageVariants: parseJson<string[] | undefined>(r.message_variants, undefined), status: r.status, createdAt: fromMysql(r.created_at) ?? todayISO(), contactedAt: fromMysql(r.contacted_at ?? undefined), repliedAt: fromMysql(r.replied_at ?? undefined),
   };
 }
-export async function getQualifiedLeads(opts: { status?: string; limit?: number; waVerifiedOnly?: boolean } = {}) {
+export async function getQualifiedLeads(opts: { status?: string; limit?: number; offset?: number; waVerifiedOnly?: boolean } = {}) {
   const conn = await getConn();
   try {
     const where: string[] = []; const params: unknown[] = [];
     if (opts.status) { where.push("status = ?"); params.push(opts.status); }
     if (opts.waVerifiedOnly !== false) { where.push("wa_verified = 1"); }
-    const lim = Math.min(Math.max(Number(opts.limit) || 100, 1), 1000);
-    const sql = "SELECT * FROM qualified_leads" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY score DESC, created_at DESC LIMIT " + lim;
+    const lim = Math.min(Math.max(Math.floor(Number(opts.limit) || 100), 1), 1000);
+    const off = Math.max(Math.floor(Number(opts.offset) || 0), 0);
+    const sql = "SELECT * FROM qualified_leads" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY score DESC, created_at DESC LIMIT " + lim + " OFFSET " + off;
     const [rows] = await conn.query<QualifiedLeadRow[]>(sql, params);
     return rows.map(rowToQualifiedLead);
+  } finally { conn.release(); }
+}
+export async function countQualifiedLeadsFiltered(opts: { status?: string; waVerifiedOnly?: boolean } = {}) {
+  const conn = await getConn();
+  try {
+    const where: string[] = []; const params: unknown[] = [];
+    if (opts.status) { where.push("status = ?"); params.push(opts.status); }
+    if (opts.waVerifiedOnly !== false) { where.push("wa_verified = 1"); }
+    const sql = "SELECT COUNT(*) total FROM qualified_leads" + (where.length ? " WHERE " + where.join(" AND ") : "");
+    const [r] = await conn.query<RowDataPacket[]>(sql, params);
+    return Number(r[0]?.total ?? 0);
   } finally { conn.release(); }
 }
 export async function getQualifiedLead(id: string) {

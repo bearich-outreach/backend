@@ -13,8 +13,11 @@ import {
 import {
   archiveUnverifiedQualified,
   countQualifiedLeads,
+  countQualifiedLeadsFiltered,
   countRawLeads,
+  countRawLeadsFiltered,
   countSearchTargets,
+  countTransactionsFiltered,
   countWaPending,
   createTransfer,
   deleteAccount,
@@ -47,6 +50,9 @@ import {
   insertTask,
   insertTransaction,
   insertWebhookLog,
+  PAGE_SIZE,
+  parsePage,
+  pageOffset,
   resetOutreachData,
   retryFailedTargets,
   saveCashflowSettings,
@@ -217,9 +223,13 @@ outreach.get("/queue", async (_req, res) => {
 
 outreach.get("/leads", async (req, res) => {
   const status = String(req.query.status ?? "");
+  const page = parsePage(req.query.page);
   // Semua qualified dijamin wa_verified=1 (lihat scraper gate + guard insert).
-  const leads = await getQualifiedLeads({ status: status || undefined, limit: 200 });
-  res.json({ leads });
+  const [leads, total] = await Promise.all([
+    getQualifiedLeads({ status: status || undefined, limit: PAGE_SIZE, offset: pageOffset(page) }),
+    countQualifiedLeadsFiltered({ status: status || undefined }),
+  ]);
+  res.json({ leads, page, pageSize: PAGE_SIZE, total });
 });
 
 outreach.get("/leads/:id", async (req, res) => {
@@ -318,16 +328,24 @@ outreach.post("/leads/:id/followup-replied", h(async (req, res) => {
 
 outreach.get("/targets", async (req, res) => {
   const status = typeof req.query.status === "string" ? req.query.status : undefined;
-  const targets = await getSearchTargets({ status, limit: 200 });
-  const counts = await countSearchTargets();
-  res.json({ targets, counts });
+  const page = parsePage(req.query.page);
+  const [targets, counts] = await Promise.all([
+    getSearchTargets({ status, limit: PAGE_SIZE, offset: pageOffset(page) }),
+    countSearchTargets(),
+  ]);
+  const total = status ? (counts.byStatus[status] ?? 0) : counts.total;
+  res.json({ targets, counts, page, pageSize: PAGE_SIZE, total });
 });
 
 outreach.get("/raw-leads", async (req, res) => {
   const city = typeof req.query.city === "string" ? req.query.city : undefined;
   const category = typeof req.query.category === "string" ? req.query.category : undefined;
-  const leads = await getRawLeads({ city, category, limit: 100 });
-  res.json({ rawLeads: leads });
+  const page = parsePage(req.query.page);
+  const [rawLeads, total] = await Promise.all([
+    getRawLeads({ city, category, limit: PAGE_SIZE, offset: pageOffset(page) }),
+    countRawLeadsFiltered({ city, category }),
+  ]);
+  res.json({ rawLeads, page, pageSize: PAGE_SIZE, total });
 });
 
 outreach.get("/scheduler/status", async (_req, res) => {
@@ -606,7 +624,7 @@ cashflow.post("/transfer", h(async (req, res) => {
 }));
 
 cashflow.get("/transactions", h(async (req, res) => {
-  const transactions = await getTransactions({
+  const filter = {
     month: parseMonth(req.query.month),
     date: parseDate(req.query.date),
     startDate: parseDate(req.query.startDate),
@@ -616,8 +634,13 @@ cashflow.get("/transactions", h(async (req, res) => {
       typeof req.query.category === "string" ? req.query.category : undefined,
     account:
       typeof req.query.account === "string" ? req.query.account : undefined,
-  });
-  res.json({ transactions });
+  };
+  const page = parsePage(req.query.page);
+  const [transactions, counts] = await Promise.all([
+    getTransactions({ ...filter, limit: PAGE_SIZE, offset: pageOffset(page) }),
+    countTransactionsFiltered(filter),
+  ]);
+  res.json({ transactions, page, pageSize: PAGE_SIZE, total: counts.total, totalIn: counts.totalIn, totalOut: counts.totalOut });
 }));
 
 cashflow.post("/transactions", h(async (req, res) => {
