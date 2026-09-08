@@ -530,6 +530,12 @@ export async function ensureSchema(): Promise<void> {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
     await conn.query(`
+      CREATE TABLE IF NOT EXISTS deepseek_daily_counter (
+        date DATE PRIMARY KEY,
+        count INT NOT NULL DEFAULT 0
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await conn.query(`
       CREATE TABLE IF NOT EXISTS wa_verify_pending (
         place_id VARCHAR(100) PRIMARY KEY,
         phone_628 VARCHAR(20) NOT NULL,
@@ -1984,6 +1990,19 @@ export async function incrDailyCount(dateStr: string): Promise<number> {
   try {
     await conn.query("INSERT INTO outreach_daily_counter (date, count) VALUES (?, 1) ON DUPLICATE KEY UPDATE count=count+1", [dateStr]);
     const [rows] = await conn.query<RowDataPacket[]>("SELECT count FROM outreach_daily_counter WHERE date=?", [dateStr]);
+    return Number(rows[0]?.count ?? 0);
+  } finally { conn.release(); }
+}
+// Kuota harian DeepSeek real: dihitung per tanggal WIB, increment hanya saat AI sukses.
+export async function getDeepseekDailyCount(dateStr: string): Promise<number> {
+  const conn = await getConn();
+  try { const [rows] = await conn.query<RowDataPacket[]>("SELECT count FROM deepseek_daily_counter WHERE date=?", [dateStr]); return rows.length ? Number(rows[0].count) : 0; } finally { conn.release(); }
+}
+export async function incrDeepseekDailyCount(dateStr: string): Promise<number> {
+  const conn = await getConn();
+  try {
+    await conn.query("INSERT INTO deepseek_daily_counter (date, count) VALUES (?, 1) ON DUPLICATE KEY UPDATE count=count+1", [dateStr]);
+    const [rows] = await conn.query<RowDataPacket[]>("SELECT count FROM deepseek_daily_counter WHERE date=?", [dateStr]);
     return Number(rows[0]?.count ?? 0);
   } finally { conn.release(); }
 }

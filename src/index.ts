@@ -31,6 +31,7 @@ import {
   getCashflowSettings,
   getCashflowSummary,
   getDailyCount,
+  getDeepseekDailyCount,
   getNote,
   getNotes,
   getNoteTags,
@@ -212,7 +213,11 @@ outreach.get("/stats", async (_req, res) => {
   const envKey = process.env.DEEPSEEK_API_KEY?.trim();
   const keyConfigured = Boolean(envKey || settings.apiKey);
   const deepseekMode = settings.provider === "deepseek" && keyConfigured ? "deepseek" : "spintax";
-  res.json({ metrics: { qualified, targets, rawLeads: rawCount, dailySent: daily, deepseekMode, provider: settings.provider, deepseekKeyConfigured: keyConfigured } });
+  const aiLimitRaw = Number(process.env.DAILY_DEEPSEEK_LIMIT ?? 15);
+  const aiLimit = Number.isFinite(aiLimitRaw) ? aiLimitRaw : 15;
+  const todayWIB = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" })).toISOString().slice(0, 10);
+  const aiUsed = await getDeepseekDailyCount(todayWIB);
+  res.json({ metrics: { qualified, targets, rawLeads: rawCount, dailySent: daily, deepseekMode, provider: settings.provider, deepseekKeyConfigured: keyConfigured, deepseekDaily: { used: aiUsed, limit: aiLimit } } });
 });
 
 outreach.get("/queue", async (_req, res) => {
@@ -419,7 +424,10 @@ outreach.get("/settings", async (_req, res) => {
 outreach.post("/settings", async (req, res) => {
   const current = await getSettings();
   const body = (req.body ?? {}) as Partial<Settings>;
-  const merged: Settings = { ...current, ...body };
+  // Field mati yang diabaikan: segmentFocus, weeklyTarget, sequence (lihat rencana bersih-bersih).
+  const { segmentFocus: _sf, weeklyTarget: _wt, sequence: _seq, ...live } = body;
+  void _sf; void _wt; void _seq;
+  const merged: Settings = { ...current, ...live };
   if (process.env.DEEPSEEK_API_KEY?.trim()) {
     merged.apiKey = "";
     // provider toggle tetap dihormati (none/spintax vs deepseek)
@@ -428,15 +436,6 @@ outreach.post("/settings", async (req, res) => {
   }
   if (Array.isArray(body.services)) {
     merged.services = body.services.map(String).filter(Boolean);
-  }
-  if (Array.isArray(body.sequence)) {
-    merged.sequence = (body.sequence as { delayDays: number; template: string }[])
-      .filter((x) => x && typeof x.template === "string")
-      .map((x, i) => ({
-        id: `step-${i + 1}`,
-        delayDays: Number(x.delayDays) || 0,
-        template: x.template,
-      }));
   }
   const saved = await saveSettings(merged);
   if (process.env.DEEPSEEK_API_KEY?.trim()) {

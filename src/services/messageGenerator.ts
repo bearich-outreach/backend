@@ -14,12 +14,22 @@ export async function generateQualifiedMessage(raw: RawLead, settings: Settings)
     .replaceAll("{rating}", String(raw.rating ?? ""))
     .replaceAll("{reviewCount}", String(raw.reviewCount ?? ""));
 
-  const dailyLimit = Number(process.env.DAILY_DEEPSEEK_LIMIT || 15);
   const envKey = process.env.DEEPSEEK_API_KEY?.trim() || "";
   const apiKey = envKey || settings.apiKey?.trim() || "";
   const baseUrl = process.env.DEEPSEEK_BASE_URL?.trim() || settings.baseUrl;
   const model = process.env.DEEPSEEK_MODEL?.trim() || settings.model;
-  const useAI = settings.provider === "deepseek" && Boolean(apiKey) && dailyLimit > 0;
+  // Kuota harian real (0 = tanpa batas). Gagal/error tidak memakan kuota.
+  const limitRaw = Number(process.env.DAILY_DEEPSEEK_LIMIT ?? 15);
+  const aiLimit = Number.isFinite(limitRaw) ? limitRaw : 15;
+  const todayWIB = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" })).toISOString().slice(0, 10);
+  let aiUsed = 0;
+  if (settings.provider === "deepseek" && Boolean(apiKey) && aiLimit !== 0) {
+    try {
+      const { getDeepseekDailyCount } = await import("../db");
+      aiUsed = await getDeepseekDailyCount(todayWIB);
+    } catch { aiUsed = 0; }
+  }
+  const useAI = settings.provider === "deepseek" && Boolean(apiKey) && (aiLimit <= 0 || aiUsed < aiLimit);
 
   if (!useAI) {
     const spintaxBase = `{Halo|Hai} ${raw.name} di ${raw.city}, {saya|kami} dari ${settings.businessName} bantu ${raw.category} bikin website modern. ${filled} {Minat?|Boleh diskusi?}`;
@@ -51,6 +61,10 @@ export async function generateQualifiedMessage(raw: RawLead, settings: Settings)
     const data = await res.json() as { choices?: { message?: { content?: string } }[] };
     const content = data.choices?.[0]?.message?.content?.trim();
     if (!content) throw new Error("empty");
+    try {
+      const { incrDeepseekDailyCount } = await import("../db");
+      await incrDeepseekDailyCount(todayWIB);
+    } catch { /* counter best-effort */ }
     const variants = [content, expandSpintax(content), expandSpintax(content)];
     return { message: content, variants };
   } catch {
