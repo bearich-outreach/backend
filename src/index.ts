@@ -58,7 +58,7 @@ import {
   updateTransaction,
 } from "./db";
 import { todayISO, uid } from "./store";
-import { AccountType, CashflowSettings, Note, ProspectStatus, Settings, Task } from "./types";
+import { AccountType, CashflowSettings, Note, ProspectStatus, RawLead, Settings, Task } from "./types";
 import { seedSearchTargets } from "./seeder/searchTargets";
 import { processNextTarget } from "./workers/scraper";
 import { startScheduler } from "./workers/scheduler";
@@ -204,8 +204,9 @@ outreach.get("/stats", async (_req, res) => {
   ]);
   const daily = await getDailyCount(new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" })).toISOString().slice(0,10));
   const envKey = process.env.DEEPSEEK_API_KEY?.trim();
-  const deepseekMode = settings.provider === "deepseek" && Boolean(envKey || settings.apiKey) ? "deepseek" : "spintax";
-  res.json({ metrics: { qualified, targets, rawLeads: rawCount, dailySent: daily, deepseekMode } });
+  const keyConfigured = Boolean(envKey || settings.apiKey);
+  const deepseekMode = settings.provider === "deepseek" && keyConfigured ? "deepseek" : "spintax";
+  res.json({ metrics: { qualified, targets, rawLeads: rawCount, dailySent: daily, deepseekMode, provider: settings.provider, deepseekKeyConfigured: keyConfigured } });
 });
 
 outreach.get("/queue", async (_req, res) => {
@@ -234,8 +235,42 @@ outreach.patch("/leads/:id", h(async (req, res) => {
   const allowed = ["name","company","city","category"];
   const patch: Record<string, unknown> = {};
   for (const k of allowed) if (body[k] !== undefined) (patch as Record<string,unknown>)[k] = String(body[k]).trim();
+  if (body.message !== undefined) {
+    const msg = String(body.message);
+    if (!msg.trim()) return sendError(res, 400, "pesan tidak boleh kosong");
+    if (msg.length > 2000) return sendError(res, 400, "pesan maksimal 2000 karakter");
+    patch.message = msg;
+  }
   if (body.status && ["New Lead","Contacted","Replied"].includes(String(body.status))) patch.status = String(body.status);
   const updated = await updateQualifiedLead(req.params.id, patch as never);
+  res.json({ lead: updated });
+}));
+
+outreach.post("/leads/:id/regenerate", h(async (req, res) => {
+  // Buat ulang pesan via generator aktif (DeepSeek bila dikonfigurasi, else Spintax).
+  // Menimpa message + messageVariants yang ada.
+  const cur = await getQualifiedLead(req.params.id);
+  if (!cur) return sendError(res, 404, "not found");
+  const settings = await getSettings();
+  const { generateQualifiedMessage } = await import("./services/messageGenerator");
+  const raw: RawLead = {
+    id: `raw_${cur.placeId}`,
+    placeId: cur.placeId,
+    name: cur.name,
+    address: cur.address,
+    phoneRaw: cur.phone628,
+    website: cur.website,
+    rating: cur.rating,
+    reviewCount: cur.reviewCount,
+    mapsStatus: "OPERATIONAL",
+    city: cur.city,
+    category: cur.category,
+    keyword: "",
+    createdAt: cur.createdAt,
+    lastSeenAt: cur.createdAt,
+  };
+  const { message, variants } = await generateQualifiedMessage(raw, settings);
+  const updated = await updateQualifiedLead(cur.id, { message, messageVariants: variants } as never);
   res.json({ lead: updated });
 }));
 
