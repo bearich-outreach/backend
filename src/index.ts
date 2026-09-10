@@ -516,6 +516,15 @@ jobs.delete("/listings/:id", h(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Kosongkan Sampah sekaligus (permanen). Guard ganda: wajib ?hidden=trash&confirm=yes
+// agar tidak mungkin menghapus list utama karena salah panggil.
+jobs.delete("/listings", h(async (req, res) => {
+  if (String(req.query.hidden ?? "") !== "trash") return sendError(res, 400, "wajib ?hidden=trash");
+  if (String(req.query.confirm ?? "") !== "yes") return sendError(res, 400, "wajib ?confirm=yes");
+  const { deleteTrashJobListings } = await import("./db");
+  res.json(await deleteTrashJobListings());
+}));
+
 jobs.get("/targets", async (req, res) => {
   const { getJobTargets, countJobTargets } = await import("./db");
   const status = typeof req.query.status === "string" && req.query.status ? req.query.status : undefined;

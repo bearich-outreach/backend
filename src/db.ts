@@ -2371,6 +2371,14 @@ export async function deleteJobListingPermanent(id: string): Promise<boolean> {
     return r.affectedRows > 0;
   } finally { conn.release(); }
 }
+// Kosongkan Sampah: hanya baris hidden=1. Tidak sentuh list utama / job_raw / targets.
+export async function deleteTrashJobListings(): Promise<{ removed: number }> {
+  const conn = await getConn();
+  try {
+    const [r] = await conn.query<ResultSetHeader>("DELETE FROM job_listings WHERE hidden = 1");
+    return { removed: r.affectedRows ?? 0 };
+  } finally { conn.release(); }
+}
 export async function findJobListingFuzzy(title: string, company: string): Promise<JobListing | undefined> {
   const conn = await getConn();
   try {
