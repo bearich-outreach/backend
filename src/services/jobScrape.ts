@@ -15,6 +15,22 @@ export interface ScrapedJob {
 
 function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 
+// Opsi A: pakai system chromium dari Dockerfile (apk chromium) bila ada,
+// agar tidak tergantung cache Playwright (/root/.cache/ms-playwright/...).
+// Fallback ke default Playwright bila file tidak ditemukan (dev lokal).
+async function resolveChromiumExe(): Promise<string | undefined> {
+  const { existsSync } = await import("fs");
+  const candidates = [
+    process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+  ].filter(Boolean) as string[];
+  for (const p of candidates) {
+    try { if (existsSync(p)) return p; } catch {}
+  }
+  return undefined;
+}
+
 function mockJobs(keyword: string, source: "glints" | "jobstreet"): ScrapedJob[] {
   const now = new Date();
   return [0, 1].map((i) => ({
@@ -33,7 +49,12 @@ function mockJobs(keyword: string, source: "glints" | "jobstreet"): ScrapedJob[]
 
 async function scrapeViaPlaywright(keyword: string, source: "glints" | "jobstreet"): Promise<ScrapedJob[]> {
   const { chromium } = await import("playwright");
-  const browser = await chromium.launch({ headless: true });
+  const exe = await resolveChromiumExe();
+  const browser = await chromium.launch({
+    headless: true,
+    ...(exe ? { executablePath: exe } : {}),
+    args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
+  });
   try {
     const page = await browser.newPage({
       userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
