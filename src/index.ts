@@ -466,11 +466,11 @@ jobs.get("/listings", async (req, res) => {
   const { getJobListings, countJobListingsFiltered } = await import("./db");
   const status = typeof req.query.status === "string" && req.query.status ? req.query.status : undefined;
   const source = typeof req.query.source === "string" && req.query.source ? req.query.source : undefined;
-  const includeHidden = String(req.query.hidden ?? "") === "trash";
+  const trash = String(req.query.hidden ?? "") === "trash";
   const page = parsePage(req.query.page);
   const [listings, total] = await Promise.all([
-    getJobListings({ status, source, includeHidden, limit: PAGE_SIZE, offset: pageOffset(page) }),
-    countJobListingsFiltered({ status, includeHidden }),
+    getJobListings({ status, source, includeHidden: trash, hiddenOnly: trash, limit: PAGE_SIZE, offset: pageOffset(page) }),
+    countJobListingsFiltered({ status, includeHidden: trash, hiddenOnly: trash }),
   ]);
   res.json({ listings, page, pageSize: PAGE_SIZE, total });
 });

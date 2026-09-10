@@ -2311,13 +2311,14 @@ export async function upsertJobListing(l: JobListing) {
     );
   } finally { conn.release(); }
 }
-export async function getJobListings(opts: { status?: string; source?: string; includeHidden?: boolean; limit?: number; offset?: number } = {}) {
+export async function getJobListings(opts: { status?: string; source?: string; includeHidden?: boolean; hiddenOnly?: boolean; limit?: number; offset?: number } = {}) {
   const conn = await getConn();
   try {
     const where: string[] = []; const params: unknown[] = [];
     if (opts.status) { where.push("status = ?"); params.push(opts.status); }
     if (opts.source) { where.push("source = ?"); params.push(opts.source); }
-    if (!opts.includeHidden) { where.push("hidden = 0"); }
+    if (opts.hiddenOnly) { where.push("hidden = 1"); }
+    else if (!opts.includeHidden) { where.push("hidden = 0"); }
     const lim = Math.min(Math.max(Math.floor(Number(opts.limit) || 100), 1), 500);
     const off = Math.max(Math.floor(Number(opts.offset) || 0), 0);
     const sql = "SELECT * FROM job_listings" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY score DESC, posted_date DESC LIMIT " + lim + " OFFSET " + off;
@@ -2325,12 +2326,13 @@ export async function getJobListings(opts: { status?: string; source?: string; i
     return rows.map(rowToJobListing);
   } finally { conn.release(); }
 }
-export async function countJobListingsFiltered(opts: { status?: string; includeHidden?: boolean } = {}) {
+export async function countJobListingsFiltered(opts: { status?: string; includeHidden?: boolean; hiddenOnly?: boolean } = {}) {
   const conn = await getConn();
   try {
     const where: string[] = []; const params: unknown[] = [];
     if (opts.status) { where.push("status = ?"); params.push(opts.status); }
-    if (!opts.includeHidden) { where.push("hidden = 0"); }
+    if (opts.hiddenOnly) { where.push("hidden = 1"); }
+    else if (!opts.includeHidden) { where.push("hidden = 0"); }
     const sql = "SELECT COUNT(*) total FROM job_listings" + (where.length ? " WHERE " + where.join(" AND ") : "");
     const [r] = await conn.query<RowDataPacket[]>(sql, params);
     return Number(r[0]?.total ?? 0);
