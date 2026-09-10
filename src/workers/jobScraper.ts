@@ -9,7 +9,7 @@ import { uid, todayISO } from "../store";
 
 function hash(s: string) { return crypto.createHash("md5").update(s).digest("hex").slice(0, 16); }
 
-export async function processNextJobTarget(): Promise<{ keyword?: string; source?: string; rawCount?: number; listingCount?: number; captcha?: boolean }> {
+export async function processNextJobTarget(): Promise<{ keyword?: string; source?: string; rawCount?: number; listingCount?: number; skippedNonRemote?: number; captcha?: boolean }> {
   const target = await claimNextJobTarget();
   if (!target) return {};
   try {
@@ -19,34 +19,43 @@ export async function processNextJobTarget(): Promise<{ keyword?: string; source
       return { keyword: target.keyword, source: target.source, rawCount: 0, listingCount: 0 };
     }
     const now = todayISO();
-    let listings = 0;
+    let listings = 0, skippedNonRemote = 0;
     for (const s of scraped) {
       const normUrl = normalizeJobUrl(s.url);
       const extId = s.externalId || `job-${hash(normUrl)}`;
-      // Lapis 1 anti-duplikat: fuzzy title+company 30 hari
-      const dup = s.company ? await findJobListingFuzzy(s.title, s.company) : undefined;
-      const reasonSkipped = "";
+      const arrangement = s.workArrangement ?? "UNKNOWN";
+      // Gate keras non-remote: ONSITE/HYBRID dari kartu/detail langsung dibuang
+      // (tetap tercatat di job_raw untuk audit). Data lama tidak disentuh.
+      const cardReject = arrangement === "ONSITE" || arrangement === "HYBRID";
+      const { label, reviewFlag } = detectRemoteLabel(s.location, `${s.description ?? ""} ${s.title}`);
+      const isRemote = !cardReject && label === "Remote" && !reviewFlag;
+      const location = s.location || (isRemote ? "Remote" : "Tidak diketahui");
+      const reasonSkipped = isRemote
+        ? ""
+        : `non-remote: arrangement=${arrangement} label=${label} loc=${location}${s.verifiedDetail ? " (verified-detail)" : " (card-only)"}`;
       await upsertJobRaw({
         id: uid("jr_"), source: target.source, externalId: extId,
-        title: s.title, company: s.company, location: s.location, url: normUrl,
-        postedDate: s.postedDate, payload: { keyword: target.keyword, salaryText: s.salaryText },
+        title: s.title, company: s.company, location, url: normUrl,
+        postedDate: s.postedDate,
+        payload: { keyword: target.keyword, salaryText: s.salaryText, workArrangement: arrangement, verifiedDetail: s.verifiedDetail ?? false, remoteLabel: label },
         reasonSkipped, createdAt: now, lastSeenAt: now,
       });
+      if (!isRemote) { skippedNonRemote++; continue; }
+      // Lapis anti-duplikat: fuzzy title+company 30 hari
+      const dup = s.company ? await findJobListingFuzzy(s.title, s.company) : undefined;
       if (dup) continue; // sudah ada 30 hari terakhir -> skip insert listing ganda
-      // Semua tetap masuk (lock final), label Remote / Perlu Cek dari detail
-      const { label, reviewFlag } = detectRemoteLabel(s.location, `${s.description ?? ""} ${s.title}`);
       const score = scoreJob({ title: s.title, description: s.description, postedDate: s.postedDate });
       await upsertJobListing({
         id: uid("jl_"), source: target.source, externalId: extId,
         title: s.title || target.keyword, company: s.company || "Unknown",
-        location: s.location || "Remote", url: normUrl, salaryText: s.salaryText,
+        location, url: normUrl, salaryText: s.salaryText,
         remoteLabel: label, reviewFlag, score, status: "New",
         hidden: false, postedDate: s.postedDate, firstSeenAt: now, lastSeenAt: now, createdAt: now,
       });
       listings++;
     }
     await updateJobTarget(target.id, { status: "DONE" });
-    return { keyword: target.keyword, source: target.source, rawCount: scraped.length, listingCount: listings };
+    return { keyword: target.keyword, source: target.source, rawCount: scraped.length, listingCount: listings, skippedNonRemote };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const captcha = /captcha|block|verify you are human/i.test(msg);

@@ -46,7 +46,7 @@ export function scoreJob(input: JobScoreInput): number {
 
   // +20 bonus deskripsi (gaji disclosed / remote keyword / verified)
   if (/rp|idr|salary|gaji/i.test(t)) score += 5;
-  if (/remote|wfh|work from home/i.test(t)) score += 10;
+  if (/remote|wfh|work from home|dari rumah/i.test(t)) score += 10;
   if (/verified|actively hiring/i.test(t)) score += 5;
 
   // bonus junior
@@ -60,13 +60,25 @@ export function scoreJob(input: JobScoreInput): number {
 
 export type RemoteLabel = "Remote" | "Perlu Cek";
 
+/**
+ * Klasifikasi arrangement dari teks bebas (lokasi + deskripsi + judul).
+ * Kenali label Indonesia Glints: "Kerja di lokasi" (onsite),
+ * "Kerja di lokasi / rumah" (hybrid), "Remote/dari rumah" (remote).
+ * Urutan penting: hybrid dicek dulu karena mengandung frasa "kerja di lokasi".
+ */
 export function detectRemoteLabel(location: string, description: string): { label: RemoteLabel; reviewFlag: boolean } {
-  const text = `${location} ${description}`.toLowerCase();
-  const hasRemote = /remote|wfh|work from home|fully remote/i.test(text);
-  const hasOnsite = /onsite|on-site|hybrid|wfo|hadir ke kantor|penempatan|jakarta|bandung|surabaya/i.test(text);
+  const text = `${location} ${description}`;
+  const isHybrid = /kerja di lokasi\s*\/\s*rumah|hybrid/i.test(text);
+  if (isHybrid) return { label: "Perlu Cek", reviewFlag: true };
+  const hasRemote = /remote\/dari rumah|remote\/wfh|\bremote\b|\bwfh\b|work from home|fully remote|kerja remote|dari rumah/i.test(text);
+  // Catatan: nama kota TIDAK dipakai sebagai sinyal onsite — lowongan remote
+  // sering mencantumkan kota domisili perusahaan. Sinyal onsite hanya dari
+  // badge/frasa eksplisit. Yang tak terbukti remote default-nya Perlu Cek
+  // (= ditolak worker), jadi celah ini aman.
+  const hasOnsite = /kerja di lokasi|onsite|on-site|\bwfo\b|hadir ke kantor|penempatan/i.test(text);
   if (hasRemote && !hasOnsite) return { label: "Remote", reviewFlag: false };
   if (hasRemote && hasOnsite) return { label: "Perlu Cek", reviewFlag: true };
   if (!hasRemote && hasOnsite) return { label: "Perlu Cek", reviewFlag: true };
-  // tidak jelas -> tetap masuk dengan flag review (sesuai lock: semua masuk)
+  // tidak jelas -> flag review (worker memutuskan: tidak masuk listings)
   return { label: "Perlu Cek", reviewFlag: true };
 }
