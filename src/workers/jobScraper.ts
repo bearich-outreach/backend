@@ -1,17 +1,39 @@
 import crypto from "crypto";
 import {
-  claimNextJobTarget, updateJobTarget, upsertJobRaw, upsertJobListing,
+  claimNextJobTarget, peekNextJobTarget, updateJobTarget, upsertJobRaw, upsertJobListing,
   findJobListingFuzzy, getJobListings, normalizeJobUrl,
 } from "../db";
 import { scrapeJobs } from "../services/jobScrape";
 import { scoreJob, detectRemoteLabel } from "../services/jobScoring";
+import type { JobSource } from "../types";
 import { uid, todayISO } from "../store";
 
 function hash(s: string) { return crypto.createHash("md5").update(s).digest("hex").slice(0, 16); }
 
-export async function processNextJobTarget(): Promise<{ keyword?: string; source?: string; rawCount?: number; listingCount?: number; skippedNonRemote?: number; captcha?: boolean }> {
-  const target = await claimNextJobTarget();
-  if (!target) return {};
+// Pacing per source (in-memory): JobStreet yang memblokir bot hanya boleh dicoba
+// ~1x/jam, Glints tetap tiap tick 15 mnt. Berlaku untuk cron maupun tombol manual
+// karena keduanya lewat processNextJobTarget. Restart proses me-reset timer
+// (efek terburuk: 1 hit ekstra setelah deploy — dapat diterima).
+let lastJobstreetRunAt = 0;
+function jobstreetMinIntervalMs(): number {
+  const v = Number(process.env.JOBS_JOBSTREET_MIN_INTERVAL_MS ?? 3600000);
+  return Number.isFinite(v) && v >= 0 ? v : 3600000;
+}
+function isJobstreetThrottled(): boolean {
+  return Date.now() - lastJobstreetRunAt < jobstreetMinIntervalMs();
+}
+
+export async function processNextJobTarget(): Promise<{ keyword?: string; source?: string; rawCount?: number; listingCount?: number; skippedNonRemote?: number; throttled?: boolean; captcha?: boolean }> {
+  // Keputusan pacing SEBELUM klaim (klaim menaikkan attempts — jangan klaim yang
+  // akan dibuang). Bila antrean terdepan JobStreet tapi sedang di-throttle,
+  // isi slot dengan Glints agar sumber sehat tidak ikut kelaparan.
+  const next = await peekNextJobTarget();
+  if (!next) return {};
+  let sourceFilter: JobSource | undefined;
+  if (next.source === "jobstreet" && isJobstreetThrottled()) sourceFilter = "glints";
+  const target = await claimNextJobTarget(sourceFilter);
+  if (!target) return { throttled: Boolean(sourceFilter), source: sourceFilter ?? next.source };
+  if (target.source === "jobstreet") lastJobstreetRunAt = Date.now();
   try {
     const scraped = await scrapeJobs(target.keyword, target.source);
     if (scraped.length === 0 && process.env.USE_PLAYWRIGHT === "true") {

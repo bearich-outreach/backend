@@ -2206,13 +2206,28 @@ export async function updateJobTarget(id: string, patch: Partial<JobTarget>) {
     await conn.query(`UPDATE job_targets SET ${sets.join(", ")} WHERE id = ?`, params);
   } finally { conn.release(); }
 }
-export async function claimNextJobTarget(): Promise<JobTarget | undefined> {
+/**
+ * Backoff anti-hammering (tanpa migrasi skema): target yang pernah gagal
+ * (attempts tinggi) tidak boleh diklaim sebelum jeda berbasis updated_at.
+ * attempts=0 langsung eligible; 1→15 mnt; 2→1 jam; 3→6 jam; >=4→24 jam.
+ * Menghentikan cron/manual retry yang memukul situs pemblokir (captcha) dengan
+ * pola identik berulang — tiap hit sia-sia memperkeras reputasi IP.
+ */
+export async function claimNextJobTarget(source?: JobSource): Promise<JobTarget | undefined> {
   const conn = await getConn();
   try {
     await conn.query("START TRANSACTION");
-    const [rows] = await conn.query<JobTargetRow[]>(
-      "SELECT * FROM job_targets WHERE status='PENDING' ORDER BY created_at ASC LIMIT 1 FOR UPDATE"
-    );
+    const params: unknown[] = [];
+    let sql = `SELECT * FROM job_targets WHERE status='PENDING' AND (
+      attempts <= 0 OR
+      (attempts = 1 AND updated_at <= DATE_SUB(NOW(3), INTERVAL 15 MINUTE)) OR
+      (attempts = 2 AND updated_at <= DATE_SUB(NOW(3), INTERVAL 1 HOUR)) OR
+      (attempts = 3 AND updated_at <= DATE_SUB(NOW(3), INTERVAL 6 HOUR)) OR
+      (attempts >= 4 AND updated_at <= DATE_SUB(NOW(3), INTERVAL 24 HOUR))
+    )`;
+    if (source) { sql += " AND source = ?"; params.push(source); }
+    sql += " ORDER BY created_at ASC LIMIT 1 FOR UPDATE";
+    const [rows] = await conn.query<JobTargetRow[]>(sql, params);
     if (!rows.length) { await conn.query("COMMIT"); return undefined; }
     const t = rows[0];
     await conn.query("UPDATE job_targets SET status='PROCESSING', attempts=attempts+1, updated_at=? WHERE id=?", [toMysql(todayISO()), t.id]);
@@ -2221,6 +2236,16 @@ export async function claimNextJobTarget(): Promise<JobTarget | undefined> {
   } catch {
     try { await conn.query("ROLLBACK"); } catch {}
     return undefined;
+  } finally { conn.release(); }
+}
+/** Intip antrean PENDING tertua tanpa klaim (untuk keputusan pacing per source). */
+export async function peekNextJobTarget(): Promise<JobTarget | undefined> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<JobTargetRow[]>(
+      "SELECT * FROM job_targets WHERE status='PENDING' ORDER BY created_at ASC LIMIT 1"
+    );
+    return rows.length ? rowToJobTarget(rows[0]) : undefined;
   } finally { conn.release(); }
 }
 export async function retryFailedJobTargets(): Promise<{ retried: number }> {

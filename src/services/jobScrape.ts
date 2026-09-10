@@ -134,11 +134,20 @@ async function scrapeViaPlaywright(keyword: string, source: "glints" | "jobstree
         await sleep(1200 + Math.random() * 1200);
       }
       html = await page.content();
-      const lower = html.toLowerCase();
-      if (lower.includes("captcha") || lower.includes("unusual traffic") || lower.includes("verify you are human") || lower.includes("cf-challenge")) {
+      // Deteksi block dari TEKS TERLIHAT + judul (bukan HTML mentah): bundle JS
+      // halaman normal (mis. reCAPTCHA) mengandung kata "captcha" sehingga cek
+      // HTML mentah rawan false positive. Halaman block sungguhan selalu
+      // menampilkan teks ke manusia, jadi presisi tidak berkurang.
+      const visibleText = await page.evaluate(() => document.body.innerText.slice(0, 6000)).catch(() => "");
+      const titleNow = await page.title().catch(() => "");
+      const visLower = `${visibleText}\n${titleNow}`.toLowerCase();
+      const blockSignal = /captcha|unusual traffic|verify you are human|cf-challenge|access denied|attention required/i.exec(visLower);
+      if (blockSignal) {
+        console.log(`[jobs] ${source} "${keyword}" BLOCK sinyal="${blockSignal[0].toLowerCase()}" title="${titleNow.slice(0, 80)}" html=${Math.round(html.length / 1024)}kb url="${page.url().slice(0, 120)}"`);
         throw new Error("captcha: block terdeteksi di " + source);
       }
-      if (lower.includes("log in to apply") && !lower.includes("opportunities/jobs")) {
+      if (visLower.includes("log in to apply") && !html.toLowerCase().includes("opportunities/jobs")) {
+        console.log(`[jobs] ${source} "${keyword}" LOGIN_WALL title="${titleNow.slice(0, 80)}" html=${Math.round(html.length / 1024)}kb`);
         throw new Error("login_required: glints meminta login di halaman explore");
       }
       // Ekstrak anchor + konteks kartu (company ada di teks kartu, bukan anchor saja).
@@ -218,8 +227,10 @@ async function scrapeViaPlaywright(keyword: string, source: "glints" | "jobstree
         await sleep(1500);
         const detailText = await page.evaluate(() => document.body.innerText.slice(0, 4000)).catch(() => "");
         const dl = detailText.toLowerCase();
-        if (/captcha|unusual traffic|verify you are human|cf-challenge/.test(dl)) {
-          console.log(`[jobs] ${source} "${keyword}" stop detail: captcha di ${job.url.slice(0, 80)}`);
+        const detailSignal = /captcha|unusual traffic|verify you are human|cf-challenge|access denied|attention required/i.exec(dl);
+        if (detailSignal) {
+          const detailTitle = await page.title().catch(() => "");
+          console.log(`[jobs] ${source} "${keyword}" stop detail: sinyal="${detailSignal[0].toLowerCase()}" title="${detailTitle.slice(0, 80)}" di ${job.url.slice(0, 80)}`);
           break;
         }
         const detailArr = parseCardArrangement(detailText);
