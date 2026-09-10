@@ -380,6 +380,11 @@ export async function ensureSchema(): Promise<void> {
           name: "Cash Flow",
           description: "Catat uang masuk & keluar",
         },
+        {
+          slug: "jobs",
+          name: "Job Hunter",
+          description: "Cari & kumpulkan lowongan remote Glints + JobStreet",
+        },
       ];
     for (const a of DEFAULT_APPS) {
       const [rows] = await conn.query<RowDataPacket[]>(
@@ -558,6 +563,66 @@ export async function ensureSchema(): Promise<void> {
     // Migrasi kolom baru qualified_leads untuk tabel lama di production
     try { await conn.query("ALTER TABLE qualified_leads ADD COLUMN address TEXT NULL AFTER company"); } catch { /* kolom sudah ada */ }
     try { await conn.query("ALTER TABLE qualified_leads ADD COLUMN maps_url VARCHAR(600) NOT NULL DEFAULT '' AFTER website"); } catch { /* kolom sudah ada */ }
+
+    /* ---------- Jobs app: isolasi penuh, hanya CREATE IF NOT EXISTS ---------- */
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS job_targets (
+        id VARCHAR(40) PRIMARY KEY,
+        keyword VARCHAR(255) NOT NULL,
+        source ENUM('glints','jobstreet') NOT NULL DEFAULT 'glints',
+        status ENUM('PENDING','PROCESSING','DONE','FAILED') NOT NULL DEFAULT 'PENDING',
+        attempts INT NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at DATETIME(3) NOT NULL,
+        updated_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uq_keyword_source (keyword, source),
+        INDEX idx_status (status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS job_raw (
+        id VARCHAR(40) PRIMARY KEY,
+        source ENUM('glints','jobstreet') NOT NULL DEFAULT 'glints',
+        external_id VARCHAR(255) NOT NULL,
+        title VARCHAR(255) NOT NULL DEFAULT '',
+        company VARCHAR(255) NOT NULL DEFAULT '',
+        location VARCHAR(255) NOT NULL DEFAULT '',
+        url VARCHAR(1000) NOT NULL DEFAULT '',
+        posted_date DATETIME(3) NULL,
+        payload JSON,
+        reason_skipped VARCHAR(100) NOT NULL DEFAULT '',
+        created_at DATETIME(3) NOT NULL,
+        last_seen_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uq_source_ext (source, external_id),
+        UNIQUE KEY uq_norm_url (url(255)),
+        INDEX idx_seen (last_seen_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS job_listings (
+        id VARCHAR(40) PRIMARY KEY,
+        source ENUM('glints','jobstreet') NOT NULL DEFAULT 'glints',
+        external_id VARCHAR(255) NOT NULL,
+        title VARCHAR(255) NOT NULL DEFAULT '',
+        company VARCHAR(255) NOT NULL DEFAULT '',
+        location VARCHAR(255) NOT NULL DEFAULT 'Remote',
+        url VARCHAR(1000) NOT NULL DEFAULT '',
+        salary_text VARCHAR(255) NOT NULL DEFAULT '',
+        remote_label ENUM('Remote','Perlu Cek') NOT NULL DEFAULT 'Perlu Cek',
+        review_flag TINYINT(1) NOT NULL DEFAULT 0,
+        score INT NOT NULL DEFAULT 0,
+        status ENUM('New','Saved','Applied','Interview','Rejected') NOT NULL DEFAULT 'New',
+        hidden TINYINT(1) NOT NULL DEFAULT 0,
+        posted_date DATETIME(3) NULL,
+        first_seen_at DATETIME(3) NOT NULL,
+        last_seen_at DATETIME(3) NOT NULL,
+        created_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uq_source_ext (source, external_id),
+        INDEX idx_status_hidden (status, hidden),
+        INDEX idx_score (score),
+        INDEX idx_posted (posted_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
   } finally {
     conn.release();
   }
@@ -2081,4 +2146,250 @@ export async function getOutreachStats() {
   const t = await countSearchTargets();
   const r = await countRawLeads();
   return { qualified: q, targets: t, rawLeads: r };
+}
+
+/* ================= Jobs app helpers (isolasi penuh) ================= */
+
+import type { JobListing, JobRaw, JobSource, JobTarget } from "./types";
+
+interface JobTargetRow extends RowDataPacket {
+  id: string; keyword: string; source: JobSource; status: JobTarget["status"];
+  attempts: number; last_error: string | null; created_at: string; updated_at: string;
+}
+function rowToJobTarget(r: JobTargetRow): JobTarget {
+  return {
+    id: r.id, keyword: r.keyword, source: r.source, status: r.status,
+    attempts: Number(r.attempts), lastError: r.last_error ?? undefined,
+    createdAt: fromMysql(r.created_at) ?? todayISO(), updatedAt: fromMysql(r.updated_at) ?? todayISO(),
+  };
+}
+export async function getJobTargets(opts: { status?: string; source?: string; limit?: number; offset?: number } = {}) {
+  const conn = await getConn();
+  try {
+    const where: string[] = []; const params: unknown[] = [];
+    if (opts.status) { where.push("status = ?"); params.push(opts.status); }
+    if (opts.source) { where.push("source = ?"); params.push(opts.source); }
+    const lim = Math.min(Math.max(Math.floor(Number(opts.limit) || 100), 1), 500);
+    const off = Math.max(Math.floor(Number(opts.offset) || 0), 0);
+    const sql = "SELECT * FROM job_targets" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY created_at ASC LIMIT " + lim + " OFFSET " + off;
+    const [rows] = await conn.query<JobTargetRow[]>(sql, params);
+    return rows.map(rowToJobTarget);
+  } finally { conn.release(); }
+}
+export async function countJobTargets() {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<RowDataPacket[]>("SELECT status, COUNT(*) cnt FROM job_targets GROUP BY status");
+    const byStatus: Record<string, number> = {}; let total = 0;
+    rows.forEach((r) => { byStatus[String(r.status)] = Number(r.cnt); total += Number(r.cnt); });
+    return { total, byStatus };
+  } finally { conn.release(); }
+}
+export async function insertJobTarget(t: JobTarget) {
+  const conn = await getConn();
+  try {
+    await conn.query(
+      "INSERT INTO job_targets (id, keyword, source, status, attempts, last_error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE updated_at=VALUES(updated_at)",
+      [t.id, t.keyword, t.source, t.status, t.attempts, t.lastError ?? null, toMysql(t.createdAt), toMysql(t.updatedAt)]
+    );
+  } finally { conn.release(); }
+}
+export async function updateJobTarget(id: string, patch: Partial<JobTarget>) {
+  const conn = await getConn();
+  try {
+    const sets: string[] = []; const params: unknown[] = [];
+    if (patch.status) { sets.push("status = ?"); params.push(patch.status); }
+    if (patch.attempts !== undefined) { sets.push("attempts = ?"); params.push(patch.attempts); }
+    if (patch.lastError !== undefined) { sets.push("last_error = ?"); params.push(patch.lastError); }
+    sets.push("updated_at = ?"); params.push(toMysql(todayISO()));
+    params.push(id);
+    await conn.query(`UPDATE job_targets SET ${sets.join(", ")} WHERE id = ?`, params);
+  } finally { conn.release(); }
+}
+export async function claimNextJobTarget(): Promise<JobTarget | undefined> {
+  const conn = await getConn();
+  try {
+    await conn.query("START TRANSACTION");
+    const [rows] = await conn.query<JobTargetRow[]>(
+      "SELECT * FROM job_targets WHERE status='PENDING' ORDER BY created_at ASC LIMIT 1 FOR UPDATE"
+    );
+    if (!rows.length) { await conn.query("COMMIT"); return undefined; }
+    const t = rows[0];
+    await conn.query("UPDATE job_targets SET status='PROCESSING', attempts=attempts+1, updated_at=? WHERE id=?", [toMysql(todayISO()), t.id]);
+    await conn.query("COMMIT");
+    return rowToJobTarget({ ...t, status: "PROCESSING", attempts: Number(t.attempts) + 1 });
+  } catch {
+    try { await conn.query("ROLLBACK"); } catch {}
+    return undefined;
+  } finally { conn.release(); }
+}
+export async function retryFailedJobTargets(): Promise<{ retried: number }> {
+  const conn = await getConn();
+  try {
+    const [r] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM job_targets WHERE status='FAILED'");
+    const retried = Number(r[0]?.total ?? 0);
+    await conn.query("UPDATE job_targets SET status='PENDING', last_error=NULL, updated_at=? WHERE status='FAILED'", [toMysql(todayISO())]);
+    return { retried };
+  } finally { conn.release(); }
+}
+
+interface JobRawRow extends RowDataPacket {
+  id: string; source: JobSource; external_id: string; title: string; company: string;
+  location: string; url: string; posted_date: string | null; payload: string | unknown;
+  reason_skipped: string; created_at: string; last_seen_at: string;
+}
+function rowToJobRaw(r: JobRawRow): JobRaw {
+  return {
+    id: r.id, source: r.source, externalId: r.external_id, title: r.title, company: r.company,
+    location: r.location, url: r.url, postedDate: fromMysql(r.posted_date ?? undefined),
+    payload: parseJson(r.payload, undefined), reasonSkipped: r.reason_skipped || undefined,
+    createdAt: fromMysql(r.created_at) ?? todayISO(), lastSeenAt: fromMysql(r.last_seen_at) ?? todayISO(),
+  };
+}
+export function normalizeJobUrl(u: string): string {
+  try {
+    const url = new URL(u);
+    url.search = ""; url.hash = "";
+    return url.toString().toLowerCase().replace(/\/+$/, "");
+  } catch { return u.trim().toLowerCase(); }
+}
+export async function upsertJobRaw(j: JobRaw) {
+  const conn = await getConn();
+  try {
+    const normUrl = normalizeJobUrl(j.url);
+    await conn.query(
+      `INSERT INTO job_raw (id, source, external_id, title, company, location, url, posted_date, payload, reason_skipped, created_at, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE last_seen_at=VALUES(last_seen_at), title=VALUES(title), company=VALUES(company), payload=VALUES(payload), reason_skipped=VALUES(reason_skipped)`,
+      [j.id, j.source, j.externalId, j.title, j.company, j.location, normUrl, toMysql(j.postedDate), j.payload ? JSON.stringify(j.payload) : null, j.reasonSkipped ?? "", toMysql(j.createdAt), toMysql(j.lastSeenAt)]
+    );
+  } finally { conn.release(); }
+}
+export async function getJobRaw(opts: { source?: string; limit?: number; offset?: number } = {}) {
+  const conn = await getConn();
+  try {
+    const where: string[] = []; const params: unknown[] = [];
+    if (opts.source) { where.push("source = ?"); params.push(opts.source); }
+    const lim = Math.min(Math.max(Math.floor(Number(opts.limit) || 50), 1), 500);
+    const off = Math.max(Math.floor(Number(opts.offset) || 0), 0);
+    const sql = "SELECT * FROM job_raw" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY last_seen_at DESC LIMIT " + lim + " OFFSET " + off;
+    const [rows] = await conn.query<JobRawRow[]>(sql, params);
+    return rows.map(rowToJobRaw);
+  } finally { conn.release(); }
+}
+export async function countJobRaw() {
+  const conn = await getConn();
+  try { const [r] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM job_raw"); return Number(r[0]?.total ?? 0); }
+  finally { conn.release(); }
+}
+
+interface JobListingRow extends RowDataPacket {
+  id: string; source: JobSource; external_id: string; title: string; company: string;
+  location: string; url: string; salary_text: string; remote_label: JobListing["remoteLabel"];
+  review_flag: number; score: number; status: JobListing["status"]; hidden: number;
+  posted_date: string | null; first_seen_at: string; last_seen_at: string; created_at: string;
+}
+function rowToJobListing(r: JobListingRow): JobListing {
+  return {
+    id: r.id, source: r.source, externalId: r.external_id, title: r.title, company: r.company,
+    location: r.location, url: r.url, salaryText: r.salary_text || undefined,
+    remoteLabel: r.remote_label, reviewFlag: Boolean(r.review_flag), score: Number(r.score),
+    status: r.status, hidden: Boolean(r.hidden), postedDate: fromMysql(r.posted_date ?? undefined),
+    firstSeenAt: fromMysql(r.first_seen_at) ?? todayISO(), lastSeenAt: fromMysql(r.last_seen_at) ?? todayISO(),
+    createdAt: fromMysql(r.created_at) ?? todayISO(),
+  };
+}
+export async function upsertJobListing(l: JobListing) {
+  const conn = await getConn();
+  try {
+    const normUrl = normalizeJobUrl(l.url);
+    await conn.query(
+      `INSERT INTO job_listings (id, source, external_id, title, company, location, url, salary_text, remote_label, review_flag, score, status, hidden, posted_date, first_seen_at, last_seen_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE last_seen_at=VALUES(last_seen_at), title=VALUES(title), company=VALUES(company), salary_text=VALUES(salary_text), remote_label=VALUES(remote_label), review_flag=VALUES(review_flag), score=VALUES(score), posted_date=VALUES(posted_date)`,
+      [l.id, l.source, l.externalId, l.title, l.company, l.location, normUrl, l.salaryText ?? "", l.remoteLabel, l.reviewFlag ? 1 : 0, l.score, l.status, l.hidden ? 1 : 0, toMysql(l.postedDate), toMysql(l.firstSeenAt), toMysql(l.lastSeenAt), toMysql(l.createdAt)]
+    );
+  } finally { conn.release(); }
+}
+export async function getJobListings(opts: { status?: string; source?: string; includeHidden?: boolean; limit?: number; offset?: number } = {}) {
+  const conn = await getConn();
+  try {
+    const where: string[] = []; const params: unknown[] = [];
+    if (opts.status) { where.push("status = ?"); params.push(opts.status); }
+    if (opts.source) { where.push("source = ?"); params.push(opts.source); }
+    if (!opts.includeHidden) { where.push("hidden = 0"); }
+    const lim = Math.min(Math.max(Math.floor(Number(opts.limit) || 100), 1), 500);
+    const off = Math.max(Math.floor(Number(opts.offset) || 0), 0);
+    const sql = "SELECT * FROM job_listings" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY score DESC, posted_date DESC LIMIT " + lim + " OFFSET " + off;
+    const [rows] = await conn.query<JobListingRow[]>(sql, params);
+    return rows.map(rowToJobListing);
+  } finally { conn.release(); }
+}
+export async function countJobListingsFiltered(opts: { status?: string; includeHidden?: boolean } = {}) {
+  const conn = await getConn();
+  try {
+    const where: string[] = []; const params: unknown[] = [];
+    if (opts.status) { where.push("status = ?"); params.push(opts.status); }
+    if (!opts.includeHidden) { where.push("hidden = 0"); }
+    const sql = "SELECT COUNT(*) total FROM job_listings" + (where.length ? " WHERE " + where.join(" AND ") : "");
+    const [r] = await conn.query<RowDataPacket[]>(sql, params);
+    return Number(r[0]?.total ?? 0);
+  } finally { conn.release(); }
+}
+export async function countJobListings() {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<RowDataPacket[]>("SELECT status, COUNT(*) cnt FROM job_listings WHERE hidden=0 GROUP BY status");
+    const byStatus: Record<string, number> = {}; let total = 0;
+    rows.forEach((r) => { byStatus[String(r.status)] = Number(r.cnt); total += Number(r.cnt); });
+    const [h] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM job_listings WHERE hidden=1");
+    return { total, byStatus, hidden: Number(h[0]?.total ?? 0) };
+  } finally { conn.release(); }
+}
+export async function getJobListing(id: string) {
+  const conn = await getConn();
+  try { const [rows] = await conn.query<JobListingRow[]>("SELECT * FROM job_listings WHERE id = ?", [id]); return rows.length ? rowToJobListing(rows[0]) : undefined; }
+  finally { conn.release(); }
+}
+export async function updateJobListing(id: string, patch: Partial<JobListing>) {
+  const conn = await getConn();
+  try {
+    const cur = await getJobListing(id);
+    if (!cur) return undefined;
+    const m = { ...cur, ...patch };
+    await conn.query(
+      `UPDATE job_listings SET title=?, company=?, location=?, url=?, salary_text=?, remote_label=?, review_flag=?, score=?, status=?, hidden=?, posted_date=?, last_seen_at=? WHERE id=?`,
+      [m.title, m.company, m.location, normalizeJobUrl(m.url), m.salaryText ?? "", m.remoteLabel, m.reviewFlag ? 1 : 0, m.score, m.status, m.hidden ? 1 : 0, toMysql(m.postedDate), toMysql(m.lastSeenAt), id]
+    );
+    return m;
+  } finally { conn.release(); }
+}
+export async function deleteJobListingPermanent(id: string): Promise<boolean> {
+  const conn = await getConn();
+  try {
+    const [r] = await conn.query<ResultSetHeader>("DELETE FROM job_listings WHERE id = ?", [id]);
+    return r.affectedRows > 0;
+  } finally { conn.release(); }
+}
+export async function findJobListingFuzzy(title: string, company: string): Promise<JobListing | undefined> {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<JobListingRow[]>(
+      "SELECT * FROM job_listings WHERE LOWER(title)=LOWER(?) AND LOWER(company)=LOWER(?) AND last_seen_at >= DATE_SUB(NOW(3), INTERVAL 30 DAY) LIMIT 1",
+      [title, company]
+    );
+    return rows.length ? rowToJobListing(rows[0]) : undefined;
+  } finally { conn.release(); }
+}
+export async function resetJobsData() {
+  const conn = await getConn();
+  try {
+    const [r1] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM job_raw");
+    const [r2] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM job_listings");
+    await conn.query("DELETE FROM job_listings");
+    await conn.query("DELETE FROM job_raw");
+    await conn.query("UPDATE job_targets SET status='PENDING', attempts=0, last_error=NULL, updated_at=?", [toMysql(todayISO())]);
+    const t = await countJobTargets();
+    return { raw: Number(r1[0]?.total ?? 0), listings: Number(r2[0]?.total ?? 0), targets: t };
+  } finally { conn.release(); }
 }

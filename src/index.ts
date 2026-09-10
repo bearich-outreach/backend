@@ -451,6 +451,125 @@ outreach.post("/settings", async (req, res) => {
 
 app.use("/api/apps/outreach", outreach);
 
+/* ---------- Jobs app (Glints + JobStreet, full remote, isolasi penuh) ---------- */
+
+const jobs = express.Router();
+jobs.use(requirePlatformAuth);
+
+jobs.get("/stats", async (_req, res) => {
+  const { countJobListings, countJobTargets, countJobRaw } = await import("./db");
+  const [listings, targets, raw] = await Promise.all([countJobListings(), countJobTargets(), countJobRaw()]);
+  res.json({ listings, targets, raw });
+});
+
+jobs.get("/listings", async (req, res) => {
+  const { getJobListings, countJobListingsFiltered } = await import("./db");
+  const status = typeof req.query.status === "string" && req.query.status ? req.query.status : undefined;
+  const source = typeof req.query.source === "string" && req.query.source ? req.query.source : undefined;
+  const includeHidden = String(req.query.hidden ?? "") === "trash";
+  const page = parsePage(req.query.page);
+  const [listings, total] = await Promise.all([
+    getJobListings({ status, source, includeHidden, limit: PAGE_SIZE, offset: pageOffset(page) }),
+    countJobListingsFiltered({ status, includeHidden }),
+  ]);
+  res.json({ listings, page, pageSize: PAGE_SIZE, total });
+});
+
+jobs.get("/listings/:id", async (req, res) => {
+  const { getJobListing } = await import("./db");
+  const l = await getJobListing(req.params.id);
+  if (!l) return sendError(res, 404, "not found");
+  res.json({ listing: l });
+});
+
+jobs.post("/listings/:id/status", h(async (req, res) => {
+  const { getJobListing, updateJobListing } = await import("./db");
+  const cur = await getJobListing(req.params.id);
+  if (!cur) return sendError(res, 404, "not found");
+  const s = String(req.body?.status ?? "");
+  if (!["New", "Saved", "Applied", "Interview", "Rejected"].includes(s)) return sendError(res, 400, "status tidak valid");
+  const updated = await updateJobListing(cur.id, { status: s as never, lastSeenAt: new Date().toISOString() } as never);
+  res.json({ listing: updated });
+}));
+
+// Tombol Hapus: soft delete ke Sampah (hidden=1, status Rejected). Tidak sentuh app lain.
+jobs.post("/listings/:id/hide", h(async (req, res) => {
+  const { getJobListing, updateJobListing } = await import("./db");
+  const cur = await getJobListing(req.params.id);
+  if (!cur) return sendError(res, 404, "not found");
+  const updated = await updateJobListing(cur.id, { hidden: true, status: "Rejected", lastSeenAt: new Date().toISOString() } as never);
+  res.json({ listing: updated });
+}));
+
+jobs.post("/listings/:id/restore", h(async (req, res) => {
+  const { getJobListing, updateJobListing } = await import("./db");
+  const cur = await getJobListing(req.params.id);
+  if (!cur) return sendError(res, 404, "not found");
+  const updated = await updateJobListing(cur.id, { hidden: false, status: "New", lastSeenAt: new Date().toISOString() } as never);
+  res.json({ listing: updated });
+}));
+
+jobs.delete("/listings/:id", h(async (req, res) => {
+  const { deleteJobListingPermanent } = await import("./db");
+  const ok = await deleteJobListingPermanent(req.params.id);
+  if (!ok) return sendError(res, 404, "not found");
+  res.json({ ok: true });
+}));
+
+jobs.get("/targets", async (req, res) => {
+  const { getJobTargets, countJobTargets } = await import("./db");
+  const status = typeof req.query.status === "string" && req.query.status ? req.query.status : undefined;
+  const source = typeof req.query.source === "string" && req.query.source ? req.query.source : undefined;
+  const page = parsePage(req.query.page);
+  const [targets, counts] = await Promise.all([
+    getJobTargets({ status, source, limit: PAGE_SIZE, offset: pageOffset(page) }),
+    countJobTargets(),
+  ]);
+  const total = status ? (counts.byStatus[status] ?? 0) : counts.total;
+  res.json({ targets, counts, page, pageSize: PAGE_SIZE, total });
+});
+
+jobs.get("/raw", async (req, res) => {
+  const { getJobRaw, countJobRaw } = await import("./db");
+  const source = typeof req.query.source === "string" && req.query.source ? req.query.source : undefined;
+  const page = parsePage(req.query.page);
+  const [raw, total] = await Promise.all([
+    getJobRaw({ source, limit: PAGE_SIZE, offset: pageOffset(page) }),
+    countJobRaw(),
+  ]);
+  res.json({ raw, page, pageSize: PAGE_SIZE, total });
+});
+
+jobs.post("/admin/seed", h(async (_req, res) => {
+  const { seedJobTargets } = await import("./seeder/jobTargets");
+  res.json(await seedJobTargets());
+}));
+
+jobs.post("/admin/scrape-next", h(async (_req, res) => {
+  const { processNextJobTarget } = await import("./workers/jobScraper");
+  res.json(await processNextJobTarget());
+}));
+
+jobs.post("/admin/targets/retry-failed", h(async (_req, res) => {
+  const { retryFailedJobTargets } = await import("./db");
+  res.json(await retryFailedJobTargets());
+}));
+
+// Reset jobs only: tidak sentuh outreach/cashflow/notes/tasks.
+jobs.post("/admin/reset", h(async (_req, res) => {
+  const { resetJobsData } = await import("./db");
+  const { seedJobTargets } = await import("./seeder/jobTargets");
+  const reset = await resetJobsData();
+  const seed = await seedJobTargets();
+  res.json({ reset, seed });
+}));
+
+jobs.get("/scheduler/status", async (_req, res) => {
+  res.json({ cron: process.env.JOBS_CRON_ENABLED ?? "true", interval: "*/15 * * * *", maxPerDay: 10, perKeyword: 15 });
+});
+
+app.use("/api/apps/jobs", jobs);
+
 // Webhook 24/7 (no platform auth, secret check)
 app.post("/api/webhooks/wa", async (req, res) => {
   const secret = process.env.WA_WEBHOOK_SECRET;

@@ -208,3 +208,59 @@ CREATE TABLE IF NOT EXISTS wa_verify_pending (
   created_at DATETIME(3) NOT NULL,
   INDEX idx_retry (next_retry_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Jobs app (Glints + JobStreet, full remote, isolasi penuh)
+CREATE TABLE IF NOT EXISTS job_targets (
+  id VARCHAR(40) PRIMARY KEY,
+  keyword VARCHAR(255) NOT NULL,
+  source ENUM('glints','jobstreet') NOT NULL DEFAULT 'glints',
+  status ENUM('PENDING','PROCESSING','DONE','FAILED') NOT NULL DEFAULT 'PENDING',
+  attempts INT NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at DATETIME(3) NOT NULL,
+  updated_at DATETIME(3) NOT NULL,
+  UNIQUE KEY uq_keyword_source (keyword, source),
+  INDEX idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS job_raw (
+  id VARCHAR(40) PRIMARY KEY,
+  source ENUM('glints','jobstreet') NOT NULL DEFAULT 'glints',
+  external_id VARCHAR(255) NOT NULL,
+  title VARCHAR(255) NOT NULL DEFAULT '',
+  company VARCHAR(255) NOT NULL DEFAULT '',
+  location VARCHAR(255) NOT NULL DEFAULT '',
+  url VARCHAR(1000) NOT NULL DEFAULT '',
+  posted_date DATETIME(3) NULL,
+  payload JSON,
+  reason_skipped VARCHAR(100) NOT NULL DEFAULT '',
+  created_at DATETIME(3) NOT NULL,
+  last_seen_at DATETIME(3) NOT NULL,
+  UNIQUE KEY uq_source_ext (source, external_id),
+  UNIQUE KEY uq_norm_url (url(255)),
+  INDEX idx_seen (last_seen_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS job_listings (
+  id VARCHAR(40) PRIMARY KEY,
+  source ENUM('glints','jobstreet') NOT NULL DEFAULT 'glints',
+  external_id VARCHAR(255) NOT NULL,
+  title VARCHAR(255) NOT NULL DEFAULT '',
+  company VARCHAR(255) NOT NULL DEFAULT '',
+  location VARCHAR(255) NOT NULL DEFAULT 'Remote',
+  url VARCHAR(1000) NOT NULL DEFAULT '',
+  salary_text VARCHAR(255) NOT NULL DEFAULT '',
+  remote_label ENUM('Remote','Perlu Cek') NOT NULL DEFAULT 'Perlu Cek',
+  review_flag TINYINT(1) NOT NULL DEFAULT 0,
+  score INT NOT NULL DEFAULT 0,
+  status ENUM('New','Saved','Applied','Interview','Rejected') NOT NULL DEFAULT 'New',
+  hidden TINYINT(1) NOT NULL DEFAULT 0,
+  posted_date DATETIME(3) NULL,
+  first_seen_at DATETIME(3) NOT NULL,
+  last_seen_at DATETIME(3) NOT NULL,
+  created_at DATETIME(3) NOT NULL,
+  UNIQUE KEY uq_source_ext (source, external_id),
+  INDEX idx_status_hidden (status, hidden),
+  INDEX idx_score (score),
+  INDEX idx_posted (posted_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

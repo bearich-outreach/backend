@@ -254,3 +254,56 @@ export interface TaskStats {
   dueToday: number;
   doneToday: number;
 }
+
+/* ---------- Jobs app (Glints + JobStreet, full remote, 1 akun pribadi) ---------- */
+
+export type JobSource = "glints" | "jobstreet";
+export type JobTargetStatus = "PENDING" | "PROCESSING" | "DONE" | "FAILED";
+export type JobListingStatus = "New" | "Saved" | "Applied" | "Interview" | "Rejected";
+export type JobRemoteLabel = "Remote" | "Perlu Cek";
+
+export interface JobTarget {
+  id: string;
+  keyword: string;
+  source: JobSource;
+  status: JobTargetStatus;
+  attempts: number;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface JobRaw {
+  id: string;
+  source: JobSource;
+  externalId: string;
+  title: string;
+  company: string;
+  location: string;
+  url: string;
+  postedDate?: string;
+  payload?: unknown;
+  reasonSkipped?: string;
+  createdAt: string;
+  lastSeenAt: string;
+}
+
+export interface JobListing {
+  id: string;
+  source: JobSource;
+  externalId: string;
+  title: string;
+  company: string;
+  location: string;
+  url: string;
+  salaryText?: string;
+  remoteLabel: JobRemoteLabel;
+  reviewFlag: boolean;
+  score: number;
+  status: JobListingStatus;
+  hidden: boolean;
+  postedDate?: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  createdAt: string;
+}
