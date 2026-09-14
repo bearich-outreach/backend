@@ -213,7 +213,7 @@ CREATE TABLE IF NOT EXISTS wa_verify_pending (
 CREATE TABLE IF NOT EXISTS job_targets (
   id VARCHAR(40) PRIMARY KEY,
   keyword VARCHAR(255) NOT NULL,
-  source ENUM('glints','jobstreet') NOT NULL DEFAULT 'glints',
+  source ENUM('glints','jobstreet','indeed') NOT NULL DEFAULT 'glints',
   status ENUM('PENDING','PROCESSING','DONE','FAILED') NOT NULL DEFAULT 'PENDING',
   attempts INT NOT NULL DEFAULT 0,
   last_error TEXT,
@@ -225,7 +225,7 @@ CREATE TABLE IF NOT EXISTS job_targets (
 
 CREATE TABLE IF NOT EXISTS job_raw (
   id VARCHAR(40) PRIMARY KEY,
-  source ENUM('glints','jobstreet') NOT NULL DEFAULT 'glints',
+  source ENUM('glints','jobstreet','indeed') NOT NULL DEFAULT 'glints',
   external_id VARCHAR(255) NOT NULL,
   title VARCHAR(255) NOT NULL DEFAULT '',
   company VARCHAR(255) NOT NULL DEFAULT '',
@@ -243,7 +243,7 @@ CREATE TABLE IF NOT EXISTS job_raw (
 
 CREATE TABLE IF NOT EXISTS job_listings (
   id VARCHAR(40) PRIMARY KEY,
-  source ENUM('glints','jobstreet') NOT NULL DEFAULT 'glints',
+  source ENUM('glints','jobstreet','indeed') NOT NULL DEFAULT 'glints',
   external_id VARCHAR(255) NOT NULL,
   title VARCHAR(255) NOT NULL DEFAULT '',
   company VARCHAR(255) NOT NULL DEFAULT '',

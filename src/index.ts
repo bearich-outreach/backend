@@ -566,7 +566,7 @@ jobs.post("/admin/targets/retry-failed", h(async (_req, res) => {
 
 jobs.get("/scheduler/status", async (_req, res) => {
   const { jobRecycleHours } = await import("./db");
-  res.json({ cron: process.env.JOBS_CRON_ENABLED ?? "true", interval: "*/15 * * * *", maxPerDay: 10, perKeyword: 15, pool: 42, recycleHours: jobRecycleHours() });
+  res.json({ cron: process.env.JOBS_CRON_ENABLED ?? "true", interval: "*/15 * * * *", maxPerDay: 10, perKeyword: 15, pool: 63, recycleHours: jobRecycleHours(), strictSources: ["jobstreet", "indeed"] });
 });
 
 app.use("/api/apps/jobs", jobs);

@@ -10,30 +10,32 @@ import { uid, todayISO } from "../store";
 
 function hash(s: string) { return crypto.createHash("md5").update(s).digest("hex").slice(0, 16); }
 
-// Pacing per source (in-memory): JobStreet yang memblokir bot hanya boleh dicoba
-// ~1x/jam, Glints tetap tiap tick 15 mnt. Berlaku untuk cron maupun tombol manual
-// karena keduanya lewat processNextJobTarget. Restart proses me-reset timer
-// (efek terburuk: 1 hit ekstra setelah deploy — dapat diterima).
-let lastJobstreetRunAt = 0;
-function jobstreetMinIntervalMs(): number {
-  const v = Number(process.env.JOBS_JOBSTREET_MIN_INTERVAL_MS ?? 3600000);
+// Pacing per source (in-memory): JobStreet + Indeed yang memblokir bot hanya boleh
+// dicoba ~1x/jam tiap source, Glints tetap tiap tick 15 mnt. Berlaku untuk cron
+// maupun tombol manual karena keduanya lewat processNextJobTarget. Restart proses
+// me-reset timer (efek terburuk: 1 hit ekstra setelah deploy — dapat diterima).
+const lastStrictRunAt: Record<string, number> = { jobstreet: 0, indeed: 0 };
+function strictMinIntervalMs(source: JobSource): number {
+  const key = source === "jobstreet" ? "JOBS_JOBSTREET_MIN_INTERVAL_MS" : "JOBS_INDEED_MIN_INTERVAL_MS";
+  const v = Number(process.env[key] ?? 3600000);
   return Number.isFinite(v) && v >= 0 ? v : 3600000;
 }
-function isJobstreetThrottled(): boolean {
-  return Date.now() - lastJobstreetRunAt < jobstreetMinIntervalMs();
+function isStrictThrottled(source: JobSource): boolean {
+  if (source !== "jobstreet" && source !== "indeed") return false;
+  return Date.now() - (lastStrictRunAt[source] ?? 0) < strictMinIntervalMs(source);
 }
 
 export async function processNextJobTarget(): Promise<{ keyword?: string; source?: string; rawCount?: number; listingCount?: number; skippedNonRemote?: number; throttled?: boolean; captcha?: boolean; recycled?: boolean; noEligible?: boolean }> {
-  // Kolam 42 terus berputar: PENDING dulu, bila kosong putar ulang DONE
+  // Kolam 63 terus berputar: PENDING dulu, bila kosong putar ulang DONE
   // paling lama yang sudah >= cooldown (default 24 jam). FAILED tidak ikut —
   // tetap manual via Retry agar tidak menghajar situs pemblokir.
   // Keputusan pacing SEBELUM klaim (klaim menaikkan attempts — jangan klaim yang
-  // akan dibuang). Bila antrean terdepan JobStreet tapi sedang di-throttle,
-  // isi slot dengan Glints agar sumber sehat tidak ikut kelaparan.
+  // akan dibuang). Bila antrean terdepan source ketat (JobStreet/Indeed) tapi
+  // sedang di-throttle, isi slot dengan Glints agar sumber sehat tidak kelaparan.
   const next = await peekNextJobTarget();
   if (!next) return { noEligible: true };
   let sourceFilter: JobSource | undefined;
-  if (next.source === "jobstreet" && isJobstreetThrottled()) sourceFilter = "glints";
+  if ((next.source === "jobstreet" || next.source === "indeed") && isStrictThrottled(next.source)) sourceFilter = "glints";
   let target = await claimNextJobTarget(sourceFilter);
   let recycled = false;
   if (!target) {
@@ -42,7 +44,7 @@ export async function processNextJobTarget(): Promise<{ keyword?: string; source
     recycled = Boolean(target);
   }
   if (!target) return { throttled: Boolean(sourceFilter), source: sourceFilter ?? next.source, noEligible: true };
-  if (target.source === "jobstreet") lastJobstreetRunAt = Date.now();
+  if (target.source === "jobstreet" || target.source === "indeed") lastStrictRunAt[target.source] = Date.now();
   try {
     const scraped = await scrapeJobs(target.keyword, target.source);
     if (scraped.length === 0 && process.env.USE_PLAYWRIGHT === "true") {

@@ -37,7 +37,7 @@ async function resolveChromiumExe(): Promise<string | undefined> {
   return undefined;
 }
 
-function mockJobs(keyword: string, source: "glints" | "jobstreet"): ScrapedJob[] {
+function mockJobs(keyword: string, source: "glints" | "jobstreet" | "indeed"): ScrapedJob[] {
   const now = new Date();
   return [0, 1].map((i) => ({
     externalId: `mock-${source}-${keyword.replace(/\W+/g, "-").toLowerCase()}-${i}`,
@@ -46,7 +46,9 @@ function mockJobs(keyword: string, source: "glints" | "jobstreet"): ScrapedJob[]
     location: "Remote",
     url: source === "glints"
       ? `https://glints.com/id/opportunities/jobs/mock-${i}`
-      : `https://id.jobstreet.com/job/mock-${i}`,
+      : source === "jobstreet"
+        ? `https://id.jobstreet.com/job/mock-${i}`
+        : `https://id.indeed.com/lihat-lowongan-kerja-mock-${i}?jk=mock${i}abcdef1234`,
     salaryText: "",
     description: `${keyword} remote, WFH. Cocok untuk junior/intern.`,
     postedDate: new Date(now.getTime() - i * 2 * 86400000).toISOString(),
@@ -62,11 +64,9 @@ function mockJobs(keyword: string, source: "glints" | "jobstreet"): ScrapedJob[]
  * (mengandung frasa "kerja di lokasi"), baru remote, baru onsite.
  */
 export function parseCardArrangement(cardText: string): WorkArrangement {
-  const t = cardText.toLowerCase();
-  if (/kerja di lokasi\s*\/\s*rumah|hybrid/i.test(cardText)) return "HYBRID";
-  if (/remote\/dari rumah|remote\/wfh|\bremote\b|\bwfh\b|work from home|fully remote|kerja remote|dari rumah/i.test(cardText)) return "REMOTE";
-  if (/kerja di lokasi|onsite|on-site|\bwfo\b|hadir ke kantor|penempatan/i.test(cardText)) return "ONSITE";
-  void t;
+  if (/kerja di lokasi\s*\/\s*rumah|hybrid|hibrid/i.test(cardText)) return "HYBRID";
+  if (/remote\/dari rumah|remote\/wfh|\bremote\b|\bwfh\b|work from home|fully remote|kerja remote|dari rumah|kerja jarak jauh/i.test(cardText)) return "REMOTE";
+  if (/kerja di lokasi|di lokasi kerja|onsite|on-site|on site|\bwfo\b|hadir ke kantor|penempatan/i.test(cardText)) return "ONSITE";
   return "UNKNOWN";
 }
 
@@ -89,7 +89,7 @@ export function extractCardLocation(cardText: string, titleGuess: string): strin
   return "";
 }
 
-async function scrapeViaPlaywright(keyword: string, source: "glints" | "jobstreet"): Promise<ScrapedJob[]> {
+async function scrapeViaPlaywright(keyword: string, source: "glints" | "jobstreet" | "indeed"): Promise<ScrapedJob[]> {
   const { chromium } = await import("playwright");
   const exe = await resolveChromiumExe();
   const browser = await chromium.launch({
@@ -112,14 +112,17 @@ async function scrapeViaPlaywright(keyword: string, source: "glints" | "jobstree
     const glintsBase = `https://glints.com/id/opportunities/jobs/explore?keyword=${kwPlus}&country=ID&locationName=All+Cities%2FProvinces&lowestLocationLevel=1`;
     const glintsFiltered = `${glintsBase}&filter=remote`;
     const jobstreetUrl = `https://id.jobstreet.com/id/${encodeURIComponent(keyword.replace(/\s+/g, "-").toLowerCase())}-jobs?where=Remote&sortmode=ListedDate`;
-    const urlCandidates = source === "glints" ? [glintsFiltered, glintsBase] : [jobstreetUrl];
+    const indeedUrl = `https://id.indeed.com/jobs?q=${kwPlus}&l=Remote&sort=date&fromage=14`;
+    const urlCandidates = source === "glints" ? [glintsFiltered, glintsBase] : source === "jobstreet" ? [jobstreetUrl] : [indeedUrl];
     let urlUsed = urlCandidates[0];
     let html = "";
     let links: { href: string; text: string; aria: string; card: string }[] = [];
     // Tunggu render SPA: selector khusus per sumber (bukan 1 selector generik).
     const selector = source === "glints"
       ? "a[href*='/opportunities/jobs/']"
-      : "a[href*='/job/']";
+      : source === "jobstreet"
+        ? "a[href*='/job/']"
+        : "a.jcs-JobTitle, a[href*='/pagead/'], a[href*='/rc/clk']";
     for (const candidate of urlCandidates) {
       urlUsed = candidate;
       await page.goto(candidate, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -148,7 +151,7 @@ async function scrapeViaPlaywright(keyword: string, source: "glints" | "jobstree
       }
       if (visLower.includes("log in to apply") && !html.toLowerCase().includes("opportunities/jobs")) {
         console.log(`[jobs] ${source} "${keyword}" LOGIN_WALL title="${titleNow.slice(0, 80)}" html=${Math.round(html.length / 1024)}kb`);
-        throw new Error("login_required: glints meminta login di halaman explore");
+        throw new Error("login_required: " + source + " meminta login di halaman explore");
       }
       // Ekstrak anchor + konteks kartu (company ada di teks kartu, bukan anchor saja).
       links = await page.$$eval(selector, (els) =>
@@ -179,8 +182,9 @@ async function scrapeViaPlaywright(keyword: string, source: "glints" | "jobstree
     let cardRemote = 0, cardHybrid = 0, cardOnsite = 0, cardUnknown = 0;
     for (const l of links) {
       if (!l.href || seen.has(l.href)) continue;
-      // Hanya URL detail (ada UUID / id numerik), bukan halaman explore/filter.
+      // Hanya URL detail (ada UUID / id numerik / jk Indeed), bukan halaman explore/filter.
       const uuid = l.href.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1]
+        ?? l.href.match(/[?&]jk=([a-z0-9]{10,})/i)?.[1]
         ?? l.href.match(/([0-9]{6,})/)?.[1];
       if (!uuid) continue;
       seen.add(l.href);
@@ -192,10 +196,12 @@ async function scrapeViaPlaywright(keyword: string, source: "glints" | "jobstree
         if (line !== titleGuess && line.length <= 80 && !/apply|lamar|save|hari/i.test(line)) { company = line; break; }
       }
       // Arrangement + lokasi ASLI dari kartu (jangan hardcode "Remote").
-      const arrangement = source === "glints" ? parseCardArrangement(l.card) : "REMOTE";
-      const location = source === "glints"
-        ? (extractCardLocation(l.card, titleGuess) || (arrangement === "REMOTE" ? "Remote" : ""))
-        : "Remote"; // JobStreet sudah difilter ?where=Remote di URL
+      // Glints + Indeed diparse dari teks kartu; JobStreet sudah difilter
+      // ?where=Remote di URL sehingga boleh default REMOTE.
+      const arrangement = source === "jobstreet" ? "REMOTE" : parseCardArrangement(l.card);
+      const location = source === "jobstreet"
+        ? "Remote" // JobStreet sudah difilter ?where=Remote di URL
+        : (extractCardLocation(l.card, titleGuess) || (arrangement === "REMOTE" ? "Remote" : ""));
       if (arrangement === "REMOTE") cardRemote++;
       else if (arrangement === "HYBRID") cardHybrid++;
       else if (arrangement === "ONSITE") cardOnsite++;
@@ -256,7 +262,7 @@ async function scrapeViaPlaywright(keyword: string, source: "glints" | "jobstree
   }
 }
 
-export async function scrapeJobs(keyword: string, source: "glints" | "jobstreet"): Promise<ScrapedJob[]> {
+export async function scrapeJobs(keyword: string, source: "glints" | "jobstreet" | "indeed"): Promise<ScrapedJob[]> {
   const usePlaywright = process.env.USE_PLAYWRIGHT === "true";
   if (usePlaywright) {
     try {

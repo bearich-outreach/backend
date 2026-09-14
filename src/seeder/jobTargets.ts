@@ -1,4 +1,4 @@
-import { insertJobTarget, countJobTargets } from "../db";
+import { insertJobTarget, countJobTargets, getJobTargets } from "../db";
 import { uid, todayISO } from "../store";
 import type { JobSource } from "../types";
 
@@ -28,15 +28,18 @@ export const JOB_ROLES = [
   "QA Engineer Web",
 ];
 
-const SOURCES: JobSource[] = ["glints", "jobstreet"];
+const SOURCES: JobSource[] = ["glints", "jobstreet", "indeed"];
 
 export async function seedJobTargets(): Promise<{ inserted: number; total: number }> {
-  const { total } = await countJobTargets();
-  if (total > 0) return { inserted: 0, total };
+  // Tambah yang hilang saja (idempotent): 42 lama tidak disentuh updated_at-nya
+  // agar urutan putar ulang DONE tidak ke-reset. Total docita 21 x 3 = 63.
+  const existing = await getJobTargets({ limit: 500 });
+  const have = new Set(existing.map((t) => `${t.keyword}||${t.source}`));
   let inserted = 0;
   const now = todayISO();
   for (const role of JOB_ROLES) {
     for (const source of SOURCES) {
+      if (have.has(`${role}||${source}`)) continue;
       await insertJobTarget({
         id: uid("jt_"),
         keyword: role,
