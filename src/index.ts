@@ -564,17 +564,9 @@ jobs.post("/admin/targets/retry-failed", h(async (_req, res) => {
   res.json(await retryFailedJobTargets());
 }));
 
-// Reset jobs only: tidak sentuh outreach/cashflow/notes/tasks.
-jobs.post("/admin/reset", h(async (_req, res) => {
-  const { resetJobsData } = await import("./db");
-  const { seedJobTargets } = await import("./seeder/jobTargets");
-  const reset = await resetJobsData();
-  const seed = await seedJobTargets();
-  res.json({ reset, seed });
-}));
-
 jobs.get("/scheduler/status", async (_req, res) => {
-  res.json({ cron: process.env.JOBS_CRON_ENABLED ?? "true", interval: "*/15 * * * *", maxPerDay: 10, perKeyword: 15 });
+  const { jobRecycleHours } = await import("./db");
+  res.json({ cron: process.env.JOBS_CRON_ENABLED ?? "true", interval: "*/15 * * * *", maxPerDay: 10, perKeyword: 15, pool: 42, recycleHours: jobRecycleHours() });
 });
 
 app.use("/api/apps/jobs", jobs);

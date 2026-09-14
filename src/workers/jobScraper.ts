@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import {
-  claimNextJobTarget, peekNextJobTarget, updateJobTarget, upsertJobRaw, upsertJobListing,
+  claimNextJobTarget, claimRecycledJobTarget, peekNextJobTarget, updateJobTarget, upsertJobRaw, upsertJobListing,
   findJobListingFuzzy, getJobListings, normalizeJobUrl,
 } from "../db";
 import { scrapeJobs } from "../services/jobScrape";
@@ -23,16 +23,25 @@ function isJobstreetThrottled(): boolean {
   return Date.now() - lastJobstreetRunAt < jobstreetMinIntervalMs();
 }
 
-export async function processNextJobTarget(): Promise<{ keyword?: string; source?: string; rawCount?: number; listingCount?: number; skippedNonRemote?: number; throttled?: boolean; captcha?: boolean }> {
+export async function processNextJobTarget(): Promise<{ keyword?: string; source?: string; rawCount?: number; listingCount?: number; skippedNonRemote?: number; throttled?: boolean; captcha?: boolean; recycled?: boolean; noEligible?: boolean }> {
+  // Kolam 42 terus berputar: PENDING dulu, bila kosong putar ulang DONE
+  // paling lama yang sudah >= cooldown (default 24 jam). FAILED tidak ikut —
+  // tetap manual via Retry agar tidak menghajar situs pemblokir.
   // Keputusan pacing SEBELUM klaim (klaim menaikkan attempts — jangan klaim yang
   // akan dibuang). Bila antrean terdepan JobStreet tapi sedang di-throttle,
   // isi slot dengan Glints agar sumber sehat tidak ikut kelaparan.
   const next = await peekNextJobTarget();
-  if (!next) return {};
+  if (!next) return { noEligible: true };
   let sourceFilter: JobSource | undefined;
   if (next.source === "jobstreet" && isJobstreetThrottled()) sourceFilter = "glints";
-  const target = await claimNextJobTarget(sourceFilter);
-  if (!target) return { throttled: Boolean(sourceFilter), source: sourceFilter ?? next.source };
+  let target = await claimNextJobTarget(sourceFilter);
+  let recycled = false;
+  if (!target) {
+    // Tidak ada PENDING yang eligible (habis / kena backoff) -> coba recycle DONE lama.
+    target = await claimRecycledJobTarget(sourceFilter);
+    recycled = Boolean(target);
+  }
+  if (!target) return { throttled: Boolean(sourceFilter), source: sourceFilter ?? next.source, noEligible: true };
   if (target.source === "jobstreet") lastJobstreetRunAt = Date.now();
   try {
     const scraped = await scrapeJobs(target.keyword, target.source);
@@ -77,12 +86,12 @@ export async function processNextJobTarget(): Promise<{ keyword?: string; source
       listings++;
     }
     await updateJobTarget(target.id, { status: "DONE" });
-    return { keyword: target.keyword, source: target.source, rawCount: scraped.length, listingCount: listings, skippedNonRemote };
+    return { keyword: target.keyword, source: target.source, rawCount: scraped.length, listingCount: listings, skippedNonRemote, recycled };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const captcha = /captcha|block|verify you are human/i.test(msg);
     await updateJobTarget(target.id, { status: "FAILED", lastError: msg.slice(0, 500) });
-    return { keyword: target.keyword, source: target.source, captcha };
+    return { keyword: target.keyword, source: target.source, captcha, recycled };
   }
 }
 

@@ -2238,14 +2238,53 @@ export async function claimNextJobTarget(source?: JobSource): Promise<JobTarget 
     return undefined;
   } finally { conn.release(); }
 }
-/** Intip antrean PENDING tertua tanpa klaim (untuk keputusan pacing per source). */
+/** Intip antrean PENDING tertua tanpa klaim (untuk keputusan pacing per source).
+ *  Bila PENDING kosong, intip DONE yang sudah layak putar ulang (>= cooldown)
+ *  agar pacing JobStreet vs Glints tetap benar saat mode recycle. */
 export async function peekNextJobTarget(): Promise<JobTarget | undefined> {
   const conn = await getConn();
   try {
     const [rows] = await conn.query<JobTargetRow[]>(
       "SELECT * FROM job_targets WHERE status='PENDING' ORDER BY created_at ASC LIMIT 1"
     );
-    return rows.length ? rowToJobTarget(rows[0]) : undefined;
+    if (rows.length) return rowToJobTarget(rows[0]);
+    const hours = jobRecycleHours();
+    const [rec] = await conn.query<JobTargetRow[]>(
+      "SELECT * FROM job_targets WHERE status='DONE' AND updated_at <= DATE_SUB(NOW(3), INTERVAL ? HOUR) ORDER BY updated_at ASC LIMIT 1",
+      [hours]
+    );
+    return rec.length ? rowToJobTarget(rec[0]) : undefined;
+  } finally { conn.release(); }
+}
+/** Cooldown putaran ulang DONE -> PROCESSING (jam). Default 24, bisa via env. */
+export function jobRecycleHours(): number {
+  const v = Number(process.env.JOBS_RECYCLE_HOURS ?? 24);
+  return Number.isFinite(v) && v >= 1 ? v : 24;
+}
+/**
+ * Klaim DONE paling lama untuk putaran ulang (kolam 42 terus berputar).
+ * Hanya DONE yang updated_at-nya sudah >= cooldown yang eligible.
+ * attempts di-reset ke 1 (siklus baru) agar tidak kena backoff FAILED lama.
+ * FAILED tidak ikut di sini — tetap manual via retry agar IP tidak dihajar.
+ */
+export async function claimRecycledJobTarget(source?: JobSource): Promise<JobTarget | undefined> {
+  const conn = await getConn();
+  try {
+    await conn.query("START TRANSACTION");
+    const hours = jobRecycleHours();
+    const params: unknown[] = [hours];
+    let sql = `SELECT * FROM job_targets WHERE status='DONE' AND updated_at <= DATE_SUB(NOW(3), INTERVAL ? HOUR)`;
+    if (source) { sql += " AND source = ?"; params.push(source); }
+    sql += " ORDER BY updated_at ASC LIMIT 1 FOR UPDATE";
+    const [rows] = await conn.query<JobTargetRow[]>(sql, params);
+    if (!rows.length) { await conn.query("COMMIT"); return undefined; }
+    const t = rows[0];
+    await conn.query("UPDATE job_targets SET status='PROCESSING', attempts=1, last_error=NULL, updated_at=? WHERE id=?", [toMysql(todayISO()), t.id]);
+    await conn.query("COMMIT");
+    return rowToJobTarget({ ...t, status: "PROCESSING", attempts: 1 });
+  } catch {
+    try { await conn.query("ROLLBACK"); } catch {}
+    return undefined;
   } finally { conn.release(); }
 }
 export async function retryFailedJobTargets(): Promise<{ retried: number }> {
@@ -2414,17 +2453,5 @@ export async function findJobListingFuzzy(title: string, company: string): Promi
       [title, company]
     );
     return rows.length ? rowToJobListing(rows[0]) : undefined;
-  } finally { conn.release(); }
-}
-export async function resetJobsData() {
-  const conn = await getConn();
-  try {
-    const [r1] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM job_raw");
-    const [r2] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM job_listings");
-    await conn.query("DELETE FROM job_listings");
-    await conn.query("DELETE FROM job_raw");
-    await conn.query("UPDATE job_targets SET status='PENDING', attempts=0, last_error=NULL, updated_at=?", [toMysql(todayISO())]);
-    const t = await countJobTargets();
-    return { raw: Number(r1[0]?.total ?? 0), listings: Number(r2[0]?.total ?? 0), targets: t };
   } finally { conn.release(); }
 }
