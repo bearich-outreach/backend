@@ -549,6 +549,29 @@ jobs.get("/raw", async (req, res) => {
   res.json({ raw, page, pageSize: PAGE_SIZE, total });
 });
 
+// Top Skill Requirement: agregasi document-frequency dari title + description_snippet.
+// Satu listing = satu vote per skill. Cache 5 menit (data scrape per 15 menit).
+let skillsCache: { at: number; key: string; data: unknown } | null = null;
+jobs.get("/skills", async (req, res) => {
+  const { getJobListingsForSkills } = await import("./db");
+  const { rankSkills } = await import("./services/jobSkills");
+  const status = typeof req.query.status === "string" && req.query.status ? req.query.status : undefined;
+  const source = typeof req.query.source === "string" && req.query.source ? req.query.source : undefined;
+  const daysRaw = Number(req.query.days);
+  const days = Number.isFinite(daysRaw) && daysRaw > 0 ? Math.min(Math.floor(daysRaw), 365) : undefined;
+  const limitRaw = Number(req.query.limit);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), 100) : 20;
+  const key = JSON.stringify({ status, source, days, limit });
+  if (skillsCache && skillsCache.key === key && Date.now() - skillsCache.at < 5 * 60 * 1000) {
+    return res.json(skillsCache.data);
+  }
+  const listings = await getJobListingsForSkills({ status, source, days });
+  const { total, skills } = rankSkills(listings, { limit });
+  const data = { total, skills, filters: { status: status ?? null, source: source ?? null, days: days ?? null, limit } };
+  skillsCache = { at: Date.now(), key, data };
+  res.json(data);
+});
+
 jobs.post("/admin/seed", h(async (_req, res) => {
   const { seedJobTargets } = await import("./seeder/jobTargets");
   res.json(await seedJobTargets());

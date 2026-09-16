@@ -281,6 +281,8 @@ export interface JobRaw {
   company: string;
   location: string;
   url: string;
+  /** URL asli hasil scrape (audit). Kolom DB click_url, nullable. */
+  clickUrl?: string;
   postedDate?: string;
   payload?: unknown;
   reasonSkipped?: string;
@@ -296,7 +298,11 @@ export interface JobListing {
   company: string;
   location: string;
   url: string;
+  /** URL asli hasil scrape (audit). Kolom DB click_url, nullable. */
+  clickUrl?: string;
   salaryText?: string;
+  /** Snippet deskripsi (max ~2000 char) untuk ekstraksi skill. Nullable di DB lama. */
+  descriptionSnippet?: string;
   remoteLabel: JobRemoteLabel;
   reviewFlag: boolean;
   score: number;

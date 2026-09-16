@@ -1,4 +1,4 @@
-// Scraper Glints + JobStreet (tanpa login, publik saja).
+// Scraper Glints + JobStreet + Indeed (tanpa login, publik saja).
 // Pola sama seperti outreach mapsScrape: Playwright bila USE_PLAYWRIGHT=true,
 // else mock agar dev lokal tidak block. Throttle 2-5s, max 15/keyword.
 
@@ -42,19 +42,32 @@ function mockJobs(keyword: string, source: "glints" | "jobstreet" | "indeed"): S
   return [0, 1].map((i) => ({
     externalId: `mock-${source}-${keyword.replace(/\W+/g, "-").toLowerCase()}-${i}`,
     title: keyword,
-    company: `PT Contoh Web ${i + 1}`,
+    company: `PT Contoh Web ${i + 1} (MOCK)`,
     location: "Remote",
     url: source === "glints"
       ? `https://glints.com/id/opportunities/jobs/mock-${i}`
       : source === "jobstreet"
         ? `https://id.jobstreet.com/job/mock-${i}`
-        : `https://id.indeed.com/lihat-lowongan-kerja-mock-${i}?jk=mock${i}abcdef1234`,
+        : `https://id.indeed.com/viewjob?jk=mock${i}abcdef1234`,
     salaryText: "",
-    description: `${keyword} remote, WFH. Cocok untuk junior/intern.`,
+    description: `[MOCK — link tidak valid, hanya untuk dev lokal] ${keyword} remote, WFH. Cocok untuk junior/intern.`,
     postedDate: new Date(now.getTime() - i * 2 * 86400000).toISOString(),
     workArrangement: "REMOTE",
     verifiedDetail: false,
   }));
+}
+
+/**
+ * Kanonikalisasi URL Indeed ke format stabil viewjob?jk=...
+ * rc/clk & pagead/clk adalah redirect session-bound yang cepat expired —
+ * jangan disimpan mentah. Value jk case-sensitive -> jangan di-lowercase.
+ * Glints/JobStreet jangan lewat fungsi ini.
+ */
+export function canonicalizeIndeedUrl(raw: string): string {
+  const s = (raw ?? "").trim();
+  const jk = s.match(/[?&]jk=([A-Za-z0-9_-]{10,})/)?.[1];
+  if (jk) return `https://id.indeed.com/viewjob?jk=${jk}`;
+  return s;
 }
 
 /**
@@ -211,7 +224,7 @@ async function scrapeViaPlaywright(keyword: string, source: "glints" | "jobstree
         title: titleGuess,
         company,
         location,
-        url: l.href,
+        url: source === "indeed" ? canonicalizeIndeedUrl(l.href) : l.href,
         description: "",
         workArrangement: arrangement,
         verifiedDetail: false,

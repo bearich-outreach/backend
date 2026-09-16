@@ -54,7 +54,7 @@ export async function processNextJobTarget(): Promise<{ keyword?: string; source
     const now = todayISO();
     let listings = 0, skippedNonRemote = 0;
     for (const s of scraped) {
-      const normUrl = normalizeJobUrl(s.url);
+      const normUrl = normalizeJobUrl(s.url, target.source);
       const extId = s.externalId || `job-${hash(normUrl)}`;
       const arrangement = s.workArrangement ?? "UNKNOWN";
       // Gate keras non-remote: ONSITE/HYBRID dari kartu/detail langsung dibuang
@@ -68,9 +68,9 @@ export async function processNextJobTarget(): Promise<{ keyword?: string; source
         : `non-remote: arrangement=${arrangement} label=${label} loc=${location}${s.verifiedDetail ? " (verified-detail)" : " (card-only)"}`;
       await upsertJobRaw({
         id: uid("jr_"), source: target.source, externalId: extId,
-        title: s.title, company: s.company, location, url: normUrl,
+        title: s.title, company: s.company, location, url: normUrl, clickUrl: s.url,
         postedDate: s.postedDate,
-        payload: { keyword: target.keyword, salaryText: s.salaryText, workArrangement: arrangement, verifiedDetail: s.verifiedDetail ?? false, remoteLabel: label },
+        payload: { keyword: target.keyword, salaryText: s.salaryText, description: (s.description ?? "").slice(0, 2000), workArrangement: arrangement, verifiedDetail: s.verifiedDetail ?? false, remoteLabel: label },
         reasonSkipped, createdAt: now, lastSeenAt: now,
       });
       if (!isRemote) { skippedNonRemote++; continue; }
@@ -81,7 +81,8 @@ export async function processNextJobTarget(): Promise<{ keyword?: string; source
       await upsertJobListing({
         id: uid("jl_"), source: target.source, externalId: extId,
         title: s.title || target.keyword, company: s.company || "Unknown",
-        location, url: normUrl, salaryText: s.salaryText,
+        location, url: normUrl, clickUrl: s.url, salaryText: s.salaryText,
+        descriptionSnippet: (s.description ?? "").slice(0, 2000) || undefined,
         remoteLabel: label, reviewFlag, score, status: "New",
         hidden: false, postedDate: s.postedDate, firstSeenAt: now, lastSeenAt: now, createdAt: now,
       });

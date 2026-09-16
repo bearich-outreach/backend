@@ -588,6 +588,7 @@ export async function ensureSchema(): Promise<void> {
         company VARCHAR(255) NOT NULL DEFAULT '',
         location VARCHAR(255) NOT NULL DEFAULT '',
         url VARCHAR(1000) NOT NULL DEFAULT '',
+        click_url VARCHAR(1000) NULL,
         posted_date DATETIME(3) NULL,
         payload JSON,
         reason_skipped VARCHAR(100) NOT NULL DEFAULT '',
@@ -607,7 +608,9 @@ export async function ensureSchema(): Promise<void> {
         company VARCHAR(255) NOT NULL DEFAULT '',
         location VARCHAR(255) NOT NULL DEFAULT 'Remote',
         url VARCHAR(1000) NOT NULL DEFAULT '',
+        click_url VARCHAR(1000) NULL,
         salary_text VARCHAR(255) NOT NULL DEFAULT '',
+        description_snippet TEXT NULL,
         remote_label ENUM('Remote','Perlu Cek') NOT NULL DEFAULT 'Perlu Cek',
         review_flag TINYINT(1) NOT NULL DEFAULT 0,
         score INT NOT NULL DEFAULT 0,
@@ -627,6 +630,11 @@ export async function ensureSchema(): Promise<void> {
     try { await conn.query("ALTER TABLE job_targets MODIFY source ENUM('glints','jobstreet','indeed') NOT NULL DEFAULT 'glints'"); } catch { /* sudah indeed */ }
     try { await conn.query("ALTER TABLE job_raw MODIFY source ENUM('glints','jobstreet','indeed') NOT NULL DEFAULT 'glints'"); } catch { /* sudah indeed */ }
     try { await conn.query("ALTER TABLE job_listings MODIFY source ENUM('glints','jobstreet','indeed') NOT NULL DEFAULT 'glints'"); } catch { /* sudah indeed */ }
+    // Opsi B: kolom audit URL asli (nullable, additive — Glints/JobStreet tidak terpengaruh)
+    try { await conn.query("ALTER TABLE job_raw ADD COLUMN click_url VARCHAR(1000) NULL AFTER url"); } catch { /* kolom sudah ada */ }
+    try { await conn.query("ALTER TABLE job_listings ADD COLUMN click_url VARCHAR(1000) NULL AFTER url"); } catch { /* kolom sudah ada */ }
+    // Top Skills: snippet deskripsi untuk ekstraksi skill (additive, nullable)
+    try { await conn.query("ALTER TABLE job_listings ADD COLUMN description_snippet TEXT NULL AFTER salary_text"); } catch { /* kolom sudah ada */ }
   } finally {
     conn.release();
   }
@@ -2303,34 +2311,90 @@ export async function retryFailedJobTargets(): Promise<{ retried: number }> {
 
 interface JobRawRow extends RowDataPacket {
   id: string; source: JobSource; external_id: string; title: string; company: string;
-  location: string; url: string; posted_date: string | null; payload: string | unknown;
+  location: string; url: string; click_url?: string | null; posted_date: string | null; payload: string | unknown;
   reason_skipped: string; created_at: string; last_seen_at: string;
 }
 function rowToJobRaw(r: JobRawRow): JobRaw {
   return {
     id: r.id, source: r.source, externalId: r.external_id, title: r.title, company: r.company,
-    location: r.location, url: r.url, postedDate: fromMysql(r.posted_date ?? undefined),
+    location: r.location, url: r.url, clickUrl: r.click_url ?? undefined, postedDate: fromMysql(r.posted_date ?? undefined),
     payload: parseJson(r.payload, undefined), reasonSkipped: r.reason_skipped || undefined,
     createdAt: fromMysql(r.created_at) ?? todayISO(), lastSeenAt: fromMysql(r.last_seen_at) ?? todayISO(),
   };
 }
-export function normalizeJobUrl(u: string): string {
+export function extractIndeedJk(u: string): string | undefined {
+  const m = u.match(/[?&]jk=([A-Za-z0-9_-]{10,})/);
+  return m?.[1];
+}
+
+function isIndeedHost(host: string): boolean {
+  return host === "indeed.com" || host.endsWith(".indeed.com");
+}
+
+/**
+ * Kanonikalisasi URL Indeed ke format stabil viewjob?jk=...
+ * Hanya dipakai untuk source indeed. Glints/JobStreet tidak disentuh.
+ * Value jk case-sensitive -> jangan di-lowercase.
+ */
+export function canonicalizeIndeedUrl(u: string): string {
+  const raw = u.trim();
+  const jk = extractIndeedJk(raw);
+  if (jk) return `https://id.indeed.com/viewjob?jk=${jk}`;
   try {
-    const url = new URL(u);
+    const url = new URL(raw);
+    if (isIndeedHost(url.hostname.toLowerCase())) {
+      // Tidak ada jk -> kembalikan path+host lowercase tanpa query tracking,
+      // agar tidak menyimpan rc/clk ber-tracking yang cepat expired.
+      return `${url.protocol}//${url.hostname.toLowerCase()}${url.pathname.replace(/\/+$/, "") || "/"}`.replace(/\/$/, "");
+    }
+  } catch { /* bukan URL absolut -> fallback di bawah */ }
+  return raw;
+}
+
+export function normalizeJobUrl(u: string, source?: string): string {
+  const raw = (u ?? "").trim();
+  try {
+    const url = new URL(raw);
+    const hostLower = url.hostname.toLowerCase();
+    const looksIndeed = source === "indeed" || isIndeedHost(hostLower);
+    if (looksIndeed) {
+      // Indeed: identitas lowongan = ?jk=. Wajib dipertahankan.
+      // Perilaku lama (url.search="") menghancurkan ini -> link error.
+      const jk = url.searchParams.get("jk") || extractIndeedJk(raw);
+      if (jk) return `https://id.indeed.com/viewjob?jk=${jk}`;
+      // Tanpa jk: fallback perilaku lama tapi host+path di-lowercase saja.
+      url.search = ""; url.hash = "";
+      url.hostname = hostLower;
+      return url.toString().replace(/\/+$/, "");
+    }
+    // Glints/JobStreet: perilaku lama persis (ID ada di path).
     url.search = ""; url.hash = "";
     return url.toString().toLowerCase().replace(/\/+$/, "");
-  } catch { return u.trim().toLowerCase(); }
+  } catch { return raw.toLowerCase(); }
 }
 export async function upsertJobRaw(j: JobRaw) {
   const conn = await getConn();
   try {
-    const normUrl = normalizeJobUrl(j.url);
-    await conn.query(
-      `INSERT INTO job_raw (id, source, external_id, title, company, location, url, posted_date, payload, reason_skipped, created_at, last_seen_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE last_seen_at=VALUES(last_seen_at), title=VALUES(title), company=VALUES(company), payload=VALUES(payload), reason_skipped=VALUES(reason_skipped)`,
-      [j.id, j.source, j.externalId, j.title, j.company, j.location, normUrl, toMysql(j.postedDate), j.payload ? JSON.stringify(j.payload) : null, j.reasonSkipped ?? "", toMysql(j.createdAt), toMysql(j.lastSeenAt)]
-    );
+    const normUrl = normalizeJobUrl(j.url, j.source);
+    const clickUrl = (j.clickUrl ?? (j.url !== normUrl ? j.url : null))?.slice(0, 1000) ?? null;
+    try {
+      await conn.query(
+        `INSERT INTO job_raw (id, source, external_id, title, company, location, url, click_url, posted_date, payload, reason_skipped, created_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE last_seen_at=VALUES(last_seen_at), title=VALUES(title), company=VALUES(company), payload=VALUES(payload), reason_skipped=VALUES(reason_skipped), click_url=VALUES(click_url)`,
+        [j.id, j.source, j.externalId, j.title, j.company, j.location, normUrl, clickUrl, toMysql(j.postedDate), j.payload ? JSON.stringify(j.payload) : null, j.reasonSkipped ?? "", toMysql(j.createdAt), toMysql(j.lastSeenAt)]
+      );
+    } catch (e: unknown) {
+      // Fallback DB lama yang belum punya kolom click_url
+      if (e instanceof Error && /click_url|bad field|unknown column/i.test(e.message)) {
+        await conn.query(
+          `INSERT INTO job_raw (id, source, external_id, title, company, location, url, posted_date, payload, reason_skipped, created_at, last_seen_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE last_seen_at=VALUES(last_seen_at), title=VALUES(title), company=VALUES(company), payload=VALUES(payload), reason_skipped=VALUES(reason_skipped)`,
+          [j.id, j.source, j.externalId, j.title, j.company, j.location, normUrl, toMysql(j.postedDate), j.payload ? JSON.stringify(j.payload) : null, j.reasonSkipped ?? "", toMysql(j.createdAt), toMysql(j.lastSeenAt)]
+        );
+      } else throw e;
+    }
   } finally { conn.release(); }
 }
 export async function getJobRaw(opts: { source?: string; limit?: number; offset?: number } = {}) {
@@ -2353,14 +2417,15 @@ export async function countJobRaw() {
 
 interface JobListingRow extends RowDataPacket {
   id: string; source: JobSource; external_id: string; title: string; company: string;
-  location: string; url: string; salary_text: string; remote_label: JobListing["remoteLabel"];
+  location: string; url: string; click_url?: string | null; salary_text: string; description_snippet?: string | null; remote_label: JobListing["remoteLabel"];
   review_flag: number; score: number; status: JobListing["status"]; hidden: number;
   posted_date: string | null; first_seen_at: string; last_seen_at: string; created_at: string;
 }
 function rowToJobListing(r: JobListingRow): JobListing {
   return {
     id: r.id, source: r.source, externalId: r.external_id, title: r.title, company: r.company,
-    location: r.location, url: r.url, salaryText: r.salary_text || undefined,
+    location: r.location, url: r.url, clickUrl: r.click_url ?? undefined, salaryText: r.salary_text || undefined,
+    descriptionSnippet: r.description_snippet || undefined,
     remoteLabel: r.remote_label, reviewFlag: Boolean(r.review_flag), score: Number(r.score),
     status: r.status, hidden: Boolean(r.hidden), postedDate: fromMysql(r.posted_date ?? undefined),
     firstSeenAt: fromMysql(r.first_seen_at) ?? todayISO(), lastSeenAt: fromMysql(r.last_seen_at) ?? todayISO(),
@@ -2370,13 +2435,27 @@ function rowToJobListing(r: JobListingRow): JobListing {
 export async function upsertJobListing(l: JobListing) {
   const conn = await getConn();
   try {
-    const normUrl = normalizeJobUrl(l.url);
-    await conn.query(
-      `INSERT INTO job_listings (id, source, external_id, title, company, location, url, salary_text, remote_label, review_flag, score, status, hidden, posted_date, first_seen_at, last_seen_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE last_seen_at=VALUES(last_seen_at), title=VALUES(title), company=VALUES(company), salary_text=VALUES(salary_text), remote_label=VALUES(remote_label), review_flag=VALUES(review_flag), score=VALUES(score), posted_date=VALUES(posted_date)`,
-      [l.id, l.source, l.externalId, l.title, l.company, l.location, normUrl, l.salaryText ?? "", l.remoteLabel, l.reviewFlag ? 1 : 0, l.score, l.status, l.hidden ? 1 : 0, toMysql(l.postedDate), toMysql(l.firstSeenAt), toMysql(l.lastSeenAt), toMysql(l.createdAt)]
-    );
+    const normUrl = normalizeJobUrl(l.url, l.source);
+    const clickUrl = (l.clickUrl ?? (l.url !== normUrl ? l.url : null))?.slice(0, 1000) ?? null;
+    const snippet = l.descriptionSnippet?.slice(0, 2000) ?? null;
+    try {
+      await conn.query(
+        `INSERT INTO job_listings (id, source, external_id, title, company, location, url, click_url, salary_text, description_snippet, remote_label, review_flag, score, status, hidden, posted_date, first_seen_at, last_seen_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE last_seen_at=VALUES(last_seen_at), title=VALUES(title), company=VALUES(company), salary_text=VALUES(salary_text), description_snippet=VALUES(description_snippet), remote_label=VALUES(remote_label), review_flag=VALUES(review_flag), score=VALUES(score), posted_date=VALUES(posted_date), click_url=VALUES(click_url)`,
+        [l.id, l.source, l.externalId, l.title, l.company, l.location, normUrl, clickUrl, l.salaryText ?? "", snippet, l.remoteLabel, l.reviewFlag ? 1 : 0, l.score, l.status, l.hidden ? 1 : 0, toMysql(l.postedDate), toMysql(l.firstSeenAt), toMysql(l.lastSeenAt), toMysql(l.createdAt)]
+      );
+    } catch (e: unknown) {
+      // Fallback DB lama yang belum punya kolom click_url / description_snippet
+      if (e instanceof Error && /click_url|description_snippet|bad field|unknown column/i.test(e.message)) {
+        await conn.query(
+          `INSERT INTO job_listings (id, source, external_id, title, company, location, url, salary_text, remote_label, review_flag, score, status, hidden, posted_date, first_seen_at, last_seen_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE last_seen_at=VALUES(last_seen_at), title=VALUES(title), company=VALUES(company), salary_text=VALUES(salary_text), remote_label=VALUES(remote_label), review_flag=VALUES(review_flag), score=VALUES(score), posted_date=VALUES(posted_date)`,
+          [l.id, l.source, l.externalId, l.title, l.company, l.location, normUrl, l.salaryText ?? "", l.remoteLabel, l.reviewFlag ? 1 : 0, l.score, l.status, l.hidden ? 1 : 0, toMysql(l.postedDate), toMysql(l.firstSeenAt), toMysql(l.lastSeenAt), toMysql(l.createdAt)]
+        );
+      } else throw e;
+    }
   } finally { conn.release(); }
 }
 export async function getJobListings(opts: { status?: string; source?: string; includeHidden?: boolean; hiddenOnly?: boolean; limit?: number; offset?: number } = {}) {
@@ -2427,11 +2506,21 @@ export async function updateJobListing(id: string, patch: Partial<JobListing>) {
     const cur = await getJobListing(id);
     if (!cur) return undefined;
     const m = { ...cur, ...patch };
-    await conn.query(
-      `UPDATE job_listings SET title=?, company=?, location=?, url=?, salary_text=?, remote_label=?, review_flag=?, score=?, status=?, hidden=?, posted_date=?, last_seen_at=? WHERE id=?`,
-      [m.title, m.company, m.location, normalizeJobUrl(m.url), m.salaryText ?? "", m.remoteLabel, m.reviewFlag ? 1 : 0, m.score, m.status, m.hidden ? 1 : 0, toMysql(m.postedDate), toMysql(m.lastSeenAt), id]
-    );
-    return m;
+    const normUrl = normalizeJobUrl(m.url, m.source);
+    try {
+      await conn.query(
+        `UPDATE job_listings SET title=?, company=?, location=?, url=?, click_url=?, salary_text=?, description_snippet=?, remote_label=?, review_flag=?, score=?, status=?, hidden=?, posted_date=?, last_seen_at=? WHERE id=?`,
+        [m.title, m.company, m.location, normUrl, (m.clickUrl ?? (m.url !== normUrl ? m.url : cur.clickUrl ?? null))?.slice(0, 1000) ?? null, m.salaryText ?? "", m.descriptionSnippet?.slice(0, 2000) ?? null, m.remoteLabel, m.reviewFlag ? 1 : 0, m.score, m.status, m.hidden ? 1 : 0, toMysql(m.postedDate), toMysql(m.lastSeenAt), id]
+      );
+    } catch (e: unknown) {
+      if (e instanceof Error && /click_url|description_snippet|bad field|unknown column/i.test(e.message)) {
+        await conn.query(
+          `UPDATE job_listings SET title=?, company=?, location=?, url=?, salary_text=?, remote_label=?, review_flag=?, score=?, status=?, hidden=?, posted_date=?, last_seen_at=? WHERE id=?`,
+          [m.title, m.company, m.location, normUrl, m.salaryText ?? "", m.remoteLabel, m.reviewFlag ? 1 : 0, m.score, m.status, m.hidden ? 1 : 0, toMysql(m.postedDate), toMysql(m.lastSeenAt), id]
+        );
+      } else throw e;
+    }
+    return { ...m, url: normUrl };
   } finally { conn.release(); }
 }
 export async function deleteJobListingPermanent(id: string): Promise<boolean> {
@@ -2457,5 +2546,31 @@ export async function findJobListingFuzzy(title: string, company: string): Promi
       [title, company]
     );
     return rows.length ? rowToJobListing(rows[0]) : undefined;
+  } finally { conn.release(); }
+}
+
+/** Ambil title + snippet untuk agregasi Top Skills (tanpa pagination UI, max 2000). */
+export async function getJobListingsForSkills(opts: { status?: string; source?: string; days?: number } = {}): Promise<{ title: string; description?: string }[]> {
+  const conn = await getConn();
+  try {
+    const where: string[] = ["hidden = 0"]; const params: unknown[] = [];
+    if (opts.status) { where.push("status = ?"); params.push(opts.status); }
+    if (opts.source) { where.push("source = ?"); params.push(opts.source); }
+    const days = Math.floor(Number(opts.days) || 0);
+    if (days > 0) { where.push("last_seen_at >= DATE_SUB(NOW(3), INTERVAL ? DAY)"); params.push(days); }
+    // Kolom description_snippet mungkin belum ada di DB lama -> fallback ke title saja.
+    try {
+      const [rows] = await conn.query<RowDataPacket[]>(
+        "SELECT title, description_snippet FROM job_listings" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY last_seen_at DESC LIMIT 2000",
+        params
+      );
+      return rows.map((r) => ({ title: String(r.title ?? ""), description: r.description_snippet ? String(r.description_snippet) : undefined }));
+    } catch {
+      const [rows] = await conn.query<RowDataPacket[]>(
+        "SELECT title FROM job_listings" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY last_seen_at DESC LIMIT 2000",
+        params
+      );
+      return rows.map((r) => ({ title: String(r.title ?? "") }));
+    }
   } finally { conn.release(); }
 }

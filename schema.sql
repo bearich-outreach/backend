@@ -250,6 +250,7 @@ CREATE TABLE IF NOT EXISTS job_listings (
   location VARCHAR(255) NOT NULL DEFAULT 'Remote',
   url VARCHAR(1000) NOT NULL DEFAULT '',
   salary_text VARCHAR(255) NOT NULL DEFAULT '',
+  description_snippet TEXT NULL,
   remote_label ENUM('Remote','Perlu Cek') NOT NULL DEFAULT 'Perlu Cek',
   review_flag TINYINT(1) NOT NULL DEFAULT 0,
   score INT NOT NULL DEFAULT 0,
