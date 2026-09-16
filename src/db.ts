@@ -569,7 +569,7 @@ export async function ensureSchema(): Promise<void> {
       CREATE TABLE IF NOT EXISTS job_targets (
         id VARCHAR(40) PRIMARY KEY,
         keyword VARCHAR(255) NOT NULL,
-        source ENUM('glints','jobstreet','indeed') NOT NULL DEFAULT 'glints',
+        source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints',
         status ENUM('PENDING','PROCESSING','DONE','FAILED') NOT NULL DEFAULT 'PENDING',
         attempts INT NOT NULL DEFAULT 0,
         last_error TEXT,
@@ -582,7 +582,7 @@ export async function ensureSchema(): Promise<void> {
     await conn.query(`
       CREATE TABLE IF NOT EXISTS job_raw (
         id VARCHAR(40) PRIMARY KEY,
-        source ENUM('glints','jobstreet','indeed') NOT NULL DEFAULT 'glints',
+        source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints',
         external_id VARCHAR(255) NOT NULL,
         title VARCHAR(255) NOT NULL DEFAULT '',
         company VARCHAR(255) NOT NULL DEFAULT '',
@@ -602,7 +602,7 @@ export async function ensureSchema(): Promise<void> {
     await conn.query(`
       CREATE TABLE IF NOT EXISTS job_listings (
         id VARCHAR(40) PRIMARY KEY,
-        source ENUM('glints','jobstreet','indeed') NOT NULL DEFAULT 'glints',
+        source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints',
         external_id VARCHAR(255) NOT NULL,
         title VARCHAR(255) NOT NULL DEFAULT '',
         company VARCHAR(255) NOT NULL DEFAULT '',
@@ -627,14 +627,21 @@ export async function ensureSchema(): Promise<void> {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
     // Migrasi Indeed untuk tabel lama di production (tanpa hapus data)
-    try { await conn.query("ALTER TABLE job_targets MODIFY source ENUM('glints','jobstreet','indeed') NOT NULL DEFAULT 'glints'"); } catch { /* sudah indeed */ }
-    try { await conn.query("ALTER TABLE job_raw MODIFY source ENUM('glints','jobstreet','indeed') NOT NULL DEFAULT 'glints'"); } catch { /* sudah indeed */ }
-    try { await conn.query("ALTER TABLE job_listings MODIFY source ENUM('glints','jobstreet','indeed') NOT NULL DEFAULT 'glints'"); } catch { /* sudah indeed */ }
+    try { await conn.query("ALTER TABLE job_targets MODIFY source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints'"); } catch { /* sudah terbaru */ }
+    try { await conn.query("ALTER TABLE job_raw MODIFY source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints'"); } catch { /* sudah terbaru */ }
+    try { await conn.query("ALTER TABLE job_listings MODIFY source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints'"); } catch { /* sudah terbaru */ }
     // Opsi B: kolom audit URL asli (nullable, additive — Glints/JobStreet tidak terpengaruh)
     try { await conn.query("ALTER TABLE job_raw ADD COLUMN click_url VARCHAR(1000) NULL AFTER url"); } catch { /* kolom sudah ada */ }
     try { await conn.query("ALTER TABLE job_listings ADD COLUMN click_url VARCHAR(1000) NULL AFTER url"); } catch { /* kolom sudah ada */ }
     // Top Skills: snippet deskripsi untuk ekstraksi skill (additive, nullable)
     try { await conn.query("ALTER TABLE job_listings ADD COLUMN description_snippet TEXT NULL AFTER salary_text"); } catch { /* kolom sudah ada */ }
+    // Kuota harian OpenWebNinja (free tier 200/bln): 1 baris per tanggal.
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS own_daily_usage (
+        date DATE PRIMARY KEY,
+        count INT NOT NULL DEFAULT 0
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
   } finally {
     conn.release();
   }
@@ -2150,6 +2157,23 @@ export async function incrDeepseekDailyCount(dateStr: string): Promise<number> {
     return Number(rows[0]?.count ?? 0);
   } finally { conn.release(); }
 }
+// Kuota harian OpenWebNinja (free tier 200/bln): increment per request API.
+export function ownDailyBudget(): number {
+  const v = Number(process.env.OWN_DAILY_BUDGET ?? 6);
+  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 6;
+}
+export async function getOwnDailyCount(dateStr: string): Promise<number> {
+  const conn = await getConn();
+  try { const [rows] = await conn.query<RowDataPacket[]>("SELECT count FROM own_daily_usage WHERE date=?", [dateStr]); return rows.length ? Number(rows[0].count) : 0; } finally { conn.release(); }
+}
+export async function incrOwnDailyCount(dateStr: string): Promise<number> {
+  const conn = await getConn();
+  try {
+    await conn.query("INSERT INTO own_daily_usage (date, count) VALUES (?, 1) ON DUPLICATE KEY UPDATE count=count+1", [dateStr]);
+    const [rows] = await conn.query<RowDataPacket[]>("SELECT count FROM own_daily_usage WHERE date=?", [dateStr]);
+    return Number(rows[0]?.count ?? 0);
+  } finally { conn.release(); }
+}
 export async function getOutreachStats() {
   const [qCount, qBy, rawTotal, targetCount] = await Promise.all([countQualifiedLeads(), countQualifiedLeads(), countRawLeads(), countSearchTargets()]);
   // qBy duplicate call intentional above, fix: reuse
@@ -2225,7 +2249,7 @@ export async function updateJobTarget(id: string, patch: Partial<JobTarget>) {
  * Menghentikan cron/manual retry yang memukul situs pemblokir (captcha) dengan
  * pola identik berulang — tiap hit sia-sia memperkeras reputasi IP.
  */
-export async function claimNextJobTarget(source?: JobSource): Promise<JobTarget | undefined> {
+export async function claimNextJobTarget(source?: JobSource, exclude?: JobSource[]): Promise<JobTarget | undefined> {
   const conn = await getConn();
   try {
     await conn.query("START TRANSACTION");
@@ -2238,6 +2262,7 @@ export async function claimNextJobTarget(source?: JobSource): Promise<JobTarget 
       (attempts >= 4 AND updated_at <= DATE_SUB(NOW(3), INTERVAL 24 HOUR))
     )`;
     if (source) { sql += " AND source = ?"; params.push(source); }
+    if (exclude?.length) { sql += ` AND source NOT IN (${exclude.map(() => "?").join(",")})`; params.push(...exclude); }
     sql += " ORDER BY created_at ASC LIMIT 1 FOR UPDATE";
     const [rows] = await conn.query<JobTargetRow[]>(sql, params);
     if (!rows.length) { await conn.query("COMMIT"); return undefined; }
@@ -2253,11 +2278,14 @@ export async function claimNextJobTarget(source?: JobSource): Promise<JobTarget 
 /** Intip antrean PENDING tertua tanpa klaim (untuk keputusan pacing per source).
  *  Bila PENDING kosong, intip DONE yang sudah layak putar ulang (>= cooldown)
  *  agar pacing JobStreet vs Glints tetap benar saat mode recycle. */
-export async function peekNextJobTarget(): Promise<JobTarget | undefined> {
+export async function peekNextJobTarget(exclude?: JobSource[]): Promise<JobTarget | undefined> {
   const conn = await getConn();
   try {
+    const notIn = exclude?.length ? ` AND source NOT IN (${exclude.map(() => "?").join(",")})` : "";
+    const exParams: unknown[] = exclude?.length ? [...exclude] : [];
     const [rows] = await conn.query<JobTargetRow[]>(
-      "SELECT * FROM job_targets WHERE status='PENDING' ORDER BY created_at ASC LIMIT 1"
+      "SELECT * FROM job_targets WHERE status='PENDING'" + notIn + " ORDER BY created_at ASC LIMIT 1",
+      exParams
     );
     if (rows.length) return rowToJobTarget(rows[0]);
     const hours = jobRecycleHours();
@@ -2279,7 +2307,7 @@ export function jobRecycleHours(): number {
  * attempts di-reset ke 1 (siklus baru) agar tidak kena backoff FAILED lama.
  * FAILED tidak ikut di sini — tetap manual via retry agar IP tidak dihajar.
  */
-export async function claimRecycledJobTarget(source?: JobSource): Promise<JobTarget | undefined> {
+export async function claimRecycledJobTarget(source?: JobSource, exclude?: JobSource[]): Promise<JobTarget | undefined> {
   const conn = await getConn();
   try {
     await conn.query("START TRANSACTION");
@@ -2287,6 +2315,7 @@ export async function claimRecycledJobTarget(source?: JobSource): Promise<JobTar
     const params: unknown[] = [hours];
     let sql = `SELECT * FROM job_targets WHERE status='DONE' AND updated_at <= DATE_SUB(NOW(3), INTERVAL ? HOUR)`;
     if (source) { sql += " AND source = ?"; params.push(source); }
+    if (exclude?.length) { sql += ` AND source NOT IN (${exclude.map(() => "?").join(",")})`; params.push(...exclude); }
     sql += " ORDER BY updated_at ASC LIMIT 1 FOR UPDATE";
     const [rows] = await conn.query<JobTargetRow[]>(sql, params);
     if (!rows.length) { await conn.query("COMMIT"); return undefined; }
@@ -2368,8 +2397,19 @@ export function normalizeJobUrl(u: string, source?: string): string {
       return url.toString().replace(/\/+$/, "");
     }
     // Glints/JobStreet: perilaku lama persis (ID ada di path).
-    url.search = ""; url.hash = "";
-    return url.toString().toLowerCase().replace(/\/+$/, "");
+    if (source === "glints" || source === "jobstreet" || /(^|\.)glints\.com$/.test(hostLower) || /(^|\.)jobstreet\.(com|co\.id)$/.test(hostLower)) {
+      url.search = ""; url.hash = "";
+      return url.toString().toLowerCase().replace(/\/+$/, "");
+    }
+    // Domain lain (LinkedIn dkk via OpenWebNinja): buang param tracking saja
+    // (utm_*, fbclid, gclid, ...), pertahankan query identitas (jobId, dsb).
+    // Host di-lowercase, path dibiarkan (bisa case-sensitive).
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(utm_|fbclid|gclid|gclsrc|mc_|igshid|vero_)/i.test(key)) url.searchParams.delete(key);
+    }
+    url.hash = "";
+    url.hostname = hostLower;
+    return url.toString().replace(/\/+$/, "");
   } catch { return raw.toLowerCase(); }
 }
 export async function upsertJobRaw(j: JobRaw) {
@@ -2458,12 +2498,13 @@ export async function upsertJobListing(l: JobListing) {
     }
   } finally { conn.release(); }
 }
-export async function getJobListings(opts: { status?: string; source?: string; includeHidden?: boolean; hiddenOnly?: boolean; limit?: number; offset?: number } = {}) {
+export async function getJobListings(opts: { status?: string; source?: string; sources?: string[]; includeHidden?: boolean; hiddenOnly?: boolean; limit?: number; offset?: number } = {}) {
   const conn = await getConn();
   try {
     const where: string[] = []; const params: unknown[] = [];
     if (opts.status) { where.push("status = ?"); params.push(opts.status); }
     if (opts.source) { where.push("source = ?"); params.push(opts.source); }
+    if (opts.sources?.length) { where.push(`source IN (${opts.sources.map(() => "?").join(",")})`); params.push(...opts.sources); }
     if (opts.hiddenOnly) { where.push("hidden = 1"); }
     else if (!opts.includeHidden) { where.push("hidden = 0"); }
     const lim = Math.min(Math.max(Math.floor(Number(opts.limit) || 100), 1), 500);
@@ -2473,11 +2514,13 @@ export async function getJobListings(opts: { status?: string; source?: string; i
     return rows.map(rowToJobListing);
   } finally { conn.release(); }
 }
-export async function countJobListingsFiltered(opts: { status?: string; includeHidden?: boolean; hiddenOnly?: boolean } = {}) {
+export async function countJobListingsFiltered(opts: { status?: string; source?: string; sources?: string[]; includeHidden?: boolean; hiddenOnly?: boolean } = {}) {
   const conn = await getConn();
   try {
     const where: string[] = []; const params: unknown[] = [];
     if (opts.status) { where.push("status = ?"); params.push(opts.status); }
+    if (opts.source) { where.push("source = ?"); params.push(opts.source); }
+    if (opts.sources?.length) { where.push(`source IN (${opts.sources.map(() => "?").join(",")})`); params.push(...opts.sources); }
     if (opts.hiddenOnly) { where.push("hidden = 1"); }
     else if (!opts.includeHidden) { where.push("hidden = 0"); }
     const sql = "SELECT COUNT(*) total FROM job_listings" + (where.length ? " WHERE " + where.join(" AND ") : "");
@@ -2493,6 +2536,27 @@ export async function countJobListings() {
     rows.forEach((r) => { byStatus[String(r.status)] = Number(r.cnt); total += Number(r.cnt); });
     const [h] = await conn.query<RowDataPacket[]>("SELECT COUNT(*) total FROM job_listings WHERE hidden=1");
     return { total, byStatus, hidden: Number(h[0]?.total ?? 0) };
+  } finally { conn.release(); }
+}
+/** Hitung per-scope section: id (glints/jobstreet/indeed) vs global (openwebninja). */
+export async function countJobListingsByScope() {
+  const conn = await getConn();
+  try {
+    const [rows] = await conn.query<RowDataPacket[]>(
+      "SELECT status, (source = 'openwebninja') is_global, COUNT(*) cnt FROM job_listings WHERE hidden=0 GROUP BY status, is_global"
+    );
+    const mk = () => ({ total: 0, byStatus: {} as Record<string, number> });
+    const id = mk(); const global = mk();
+    rows.forEach((r) => {
+      const b = Number(r.is_global) === 1 ? global : id;
+      b.byStatus[String(r.status)] = Number(r.cnt); b.total += Number(r.cnt);
+    });
+    const [h] = await conn.query<RowDataPacket[]>(
+      "SELECT (source = 'openwebninja') is_global, COUNT(*) total FROM job_listings WHERE hidden=1 GROUP BY is_global"
+    );
+    let hiddenId = 0, hiddenGlobal = 0;
+    h.forEach((r) => { if (Number(r.is_global) === 1) hiddenGlobal = Number(r.total); else hiddenId = Number(r.total); });
+    return { id: { ...id, hidden: hiddenId }, global: { ...global, hidden: hiddenGlobal } };
   } finally { conn.release(); }
 }
 export async function getJobListing(id: string) {
@@ -2530,10 +2594,18 @@ export async function deleteJobListingPermanent(id: string): Promise<boolean> {
     return r.affectedRows > 0;
   } finally { conn.release(); }
 }
-// Kosongkan Sampah: hanya baris hidden=1. Tidak sentuh list utama / job_raw / targets.
-export async function deleteTrashJobListings(): Promise<{ removed: number }> {
+// Kosongkan Sampah: hanya baris hidden=1, opsional dibatasi per source (section Global vs Lowongan).
+export async function deleteTrashJobListings(source?: string, sources?: string[]): Promise<{ removed: number }> {
   const conn = await getConn();
   try {
+    if (source) {
+      const [r] = await conn.query<ResultSetHeader>("DELETE FROM job_listings WHERE hidden = 1 AND source = ?", [source]);
+      return { removed: r.affectedRows ?? 0 };
+    }
+    if (sources?.length) {
+      const [r] = await conn.query<ResultSetHeader>(`DELETE FROM job_listings WHERE hidden = 1 AND source IN (${sources.map(() => "?").join(",")})`, sources);
+      return { removed: r.affectedRows ?? 0 };
+    }
     const [r] = await conn.query<ResultSetHeader>("DELETE FROM job_listings WHERE hidden = 1");
     return { removed: r.affectedRows ?? 0 };
   } finally { conn.release(); }
@@ -2550,12 +2622,13 @@ export async function findJobListingFuzzy(title: string, company: string): Promi
 }
 
 /** Ambil title + snippet untuk agregasi Top Skills (tanpa pagination UI, max 2000). */
-export async function getJobListingsForSkills(opts: { status?: string; source?: string; days?: number } = {}): Promise<{ title: string; description?: string }[]> {
+export async function getJobListingsForSkills(opts: { status?: string; source?: string; sources?: string[]; days?: number } = {}): Promise<{ title: string; description?: string }[]> {
   const conn = await getConn();
   try {
     const where: string[] = ["hidden = 0"]; const params: unknown[] = [];
     if (opts.status) { where.push("status = ?"); params.push(opts.status); }
     if (opts.source) { where.push("source = ?"); params.push(opts.source); }
+    if (opts.sources?.length) { where.push(`source IN (${opts.sources.map(() => "?").join(",")})`); params.push(...opts.sources); }
     const days = Math.floor(Number(opts.days) || 0);
     if (days > 0) { where.push("last_seen_at >= DATE_SUB(NOW(3), INTERVAL ? DAY)"); params.push(days); }
     // Kolom description_snippet mungkin belum ada di DB lama -> fallback ke title saja.

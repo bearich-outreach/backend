@@ -29,18 +29,16 @@ export async function processNextJobTarget(): Promise<{ keyword?: string; source
   // Kolam 63 terus berputar: PENDING dulu, bila kosong putar ulang DONE
   // paling lama yang sudah >= cooldown (default 24 jam). FAILED tidak ikut —
   // tetap manual via Retry agar tidak menghajar situs pemblokir.
-  // Keputusan pacing SEBELUM klaim (klaim menaikkan attempts — jangan klaim yang
-  // akan dibuang). Bila antrean terdepan source ketat (JobStreet/Indeed) tapi
-  // sedang di-throttle, isi slot dengan Glints agar sumber sehat tidak kelaparan.
-  const next = await peekNextJobTarget();
+  // Target openwebninja dikecualikan di sini (dikerjakan worker API harian).
+  const next = await peekNextJobTarget(["openwebninja"]);
   if (!next) return { noEligible: true };
   let sourceFilter: JobSource | undefined;
   if ((next.source === "jobstreet" || next.source === "indeed") && isStrictThrottled(next.source)) sourceFilter = "glints";
-  let target = await claimNextJobTarget(sourceFilter);
+  let target = await claimNextJobTarget(sourceFilter, ["openwebninja"]);
   let recycled = false;
   if (!target) {
     // Tidak ada PENDING yang eligible (habis / kena backoff) -> coba recycle DONE lama.
-    target = await claimRecycledJobTarget(sourceFilter);
+    target = await claimRecycledJobTarget(sourceFilter, ["openwebninja"]);
     recycled = Boolean(target);
   }
   if (!target) return { throttled: Boolean(sourceFilter), source: sourceFilter ?? next.source, noEligible: true };

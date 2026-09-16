@@ -2,6 +2,8 @@
 // Pola sama seperti outreach mapsScrape: Playwright bila USE_PLAYWRIGHT=true,
 // else mock agar dev lokal tidak block. Throttle 2-5s, max 15/keyword.
 
+import type { JobSource } from "../types";
+
 export type WorkArrangement = "REMOTE" | "HYBRID" | "ONSITE" | "UNKNOWN";
 
 export interface ScrapedJob {
@@ -37,7 +39,7 @@ async function resolveChromiumExe(): Promise<string | undefined> {
   return undefined;
 }
 
-function mockJobs(keyword: string, source: "glints" | "jobstreet" | "indeed"): ScrapedJob[] {
+function mockJobs(keyword: string, source: JobSource): ScrapedJob[] {
   const now = new Date();
   return [0, 1].map((i) => ({
     externalId: `mock-${source}-${keyword.replace(/\W+/g, "-").toLowerCase()}-${i}`,
@@ -102,7 +104,7 @@ export function extractCardLocation(cardText: string, titleGuess: string): strin
   return "";
 }
 
-async function scrapeViaPlaywright(keyword: string, source: "glints" | "jobstreet" | "indeed"): Promise<ScrapedJob[]> {
+async function scrapeViaPlaywright(keyword: string, source: JobSource): Promise<ScrapedJob[]> {
   const { chromium } = await import("playwright");
   const exe = await resolveChromiumExe();
   const browser = await chromium.launch({
@@ -275,7 +277,7 @@ async function scrapeViaPlaywright(keyword: string, source: "glints" | "jobstree
   }
 }
 
-export async function scrapeJobs(keyword: string, source: "glints" | "jobstreet" | "indeed"): Promise<ScrapedJob[]> {
+export async function scrapeJobs(keyword: string, source: JobSource): Promise<ScrapedJob[]> {
   const usePlaywright = process.env.USE_PLAYWRIGHT === "true";
   if (usePlaywright) {
     try {

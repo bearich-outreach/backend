@@ -457,20 +457,23 @@ const jobs = express.Router();
 jobs.use(requirePlatformAuth);
 
 jobs.get("/stats", async (_req, res) => {
-  const { countJobListings, countJobTargets, countJobRaw } = await import("./db");
-  const [listings, targets, raw] = await Promise.all([countJobListings(), countJobTargets(), countJobRaw()]);
-  res.json({ listings, targets, raw });
+  const { countJobListings, countJobTargets, countJobRaw, countJobListingsByScope } = await import("./db");
+  const [listings, targets, raw, scope] = await Promise.all([countJobListings(), countJobTargets(), countJobRaw(), countJobListingsByScope()]);
+  res.json({ listings, targets, raw, scope });
 });
 
 jobs.get("/listings", async (req, res) => {
   const { getJobListings, countJobListingsFiltered } = await import("./db");
   const status = typeof req.query.status === "string" && req.query.status ? req.query.status : undefined;
   const source = typeof req.query.source === "string" && req.query.source ? req.query.source : undefined;
+  // scope=id: kunci ke section Lowongan (glints/jobstreet/indeed), tanpa openwebninja.
+  const scope = typeof req.query.scope === "string" ? req.query.scope : undefined;
+  const sources = scope === "id" && !source ? ["glints", "jobstreet", "indeed"] : undefined;
   const trash = String(req.query.hidden ?? "") === "trash";
   const page = parsePage(req.query.page);
   const [listings, total] = await Promise.all([
-    getJobListings({ status, source, includeHidden: trash, hiddenOnly: trash, limit: PAGE_SIZE, offset: pageOffset(page) }),
-    countJobListingsFiltered({ status, includeHidden: trash, hiddenOnly: trash }),
+    getJobListings({ status, source, sources, includeHidden: trash, hiddenOnly: trash, limit: PAGE_SIZE, offset: pageOffset(page) }),
+    countJobListingsFiltered({ status, source, sources, includeHidden: trash, hiddenOnly: trash }),
   ]);
   res.json({ listings, page, pageSize: PAGE_SIZE, total });
 });
@@ -522,6 +525,10 @@ jobs.delete("/listings", h(async (req, res) => {
   if (String(req.query.hidden ?? "") !== "trash") return sendError(res, 400, "wajib ?hidden=trash");
   if (String(req.query.confirm ?? "") !== "yes") return sendError(res, 400, "wajib ?confirm=yes");
   const { deleteTrashJobListings } = await import("./db");
+  const source = typeof req.query.source === "string" && req.query.source ? req.query.source : undefined;
+  const scope = typeof req.query.scope === "string" ? req.query.scope : undefined;
+  if (source) { res.json(await deleteTrashJobListings(source)); return; }
+  if (scope === "id") { res.json(await deleteTrashJobListings(undefined, ["glints", "jobstreet", "indeed"])); return; }
   res.json(await deleteTrashJobListings());
 }));
 
@@ -557,17 +564,24 @@ jobs.get("/skills", async (req, res) => {
   const { rankSkills } = await import("./services/jobSkills");
   const status = typeof req.query.status === "string" && req.query.status ? req.query.status : undefined;
   const source = typeof req.query.source === "string" && req.query.source ? req.query.source : undefined;
+  const scope = typeof req.query.scope === "string" ? req.query.scope : undefined;
   const daysRaw = Number(req.query.days);
   const days = Number.isFinite(daysRaw) && daysRaw > 0 ? Math.min(Math.floor(daysRaw), 365) : undefined;
   const limitRaw = Number(req.query.limit);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), 100) : 20;
-  const key = JSON.stringify({ status, source, days, limit });
+  // scope: id (glints/jobstreet/indeed) | global (openwebninja) | all (default).
+  const sources = scope === "id"
+    ? ["glints", "jobstreet", "indeed"]
+    : scope === "global"
+      ? ["openwebninja"]
+      : undefined;
+  const key = JSON.stringify({ status, source, scope, days, limit });
   if (skillsCache && skillsCache.key === key && Date.now() - skillsCache.at < 5 * 60 * 1000) {
     return res.json(skillsCache.data);
   }
-  const listings = await getJobListingsForSkills({ status, source, days });
+  const listings = await getJobListingsForSkills({ status, source, sources, days });
   const { total, skills } = rankSkills(listings, { limit });
-  const data = { total, skills, filters: { status: status ?? null, source: source ?? null, days: days ?? null, limit } };
+  const data = { total, skills, filters: { status: status ?? null, source: source ?? null, scope: scope ?? "all", days: days ?? null, limit } };
   skillsCache = { at: Date.now(), key, data };
   res.json(data);
 });
@@ -582,14 +596,28 @@ jobs.post("/admin/scrape-next", h(async (_req, res) => {
   res.json(await processNextJobTarget());
 }));
 
+// OpenWebNinja (global remote): seed 3 query + trigger manual 1 target (quota guard berlaku).
+jobs.post("/admin/seed-own", h(async (_req, res) => {
+  const { seedOwnTargets } = await import("./seeder/ownTargets");
+  res.json(await seedOwnTargets());
+}));
+
+jobs.post("/admin/own-next", h(async (_req, res) => {
+  const { processNextOwnTarget } = await import("./workers/ownWorker");
+  res.json(await processNextOwnTarget());
+}));
+
 jobs.post("/admin/targets/retry-failed", h(async (_req, res) => {
   const { retryFailedJobTargets } = await import("./db");
   res.json(await retryFailedJobTargets());
 }));
 
 jobs.get("/scheduler/status", async (_req, res) => {
-  const { jobRecycleHours } = await import("./db");
-  res.json({ cron: process.env.JOBS_CRON_ENABLED ?? "true", interval: "*/15 * * * *", maxPerDay: 10, perKeyword: 15, pool: 63, recycleHours: jobRecycleHours(), strictSources: ["jobstreet", "indeed"] });
+  const { jobRecycleHours, ownDailyBudget, getOwnDailyCount } = await import("./db");
+  const { ownApiKey } = await import("./services/openwebninja");
+  const todayWIB = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" })).toISOString().slice(0, 10);
+  const ownUsed = await getOwnDailyCount(todayWIB);
+  res.json({ cron: process.env.JOBS_CRON_ENABLED ?? "true", interval: "*/15 * * * *", maxPerDay: 10, perKeyword: 15, pool: 63, recycleHours: jobRecycleHours(), strictSources: ["jobstreet", "indeed"], own: { enabled: process.env.OWN_CRON_ENABLED ?? "true", schedule: "0 0 * * * (00:00 UTC = 07:00 WIB)", keyConfigured: Boolean(ownApiKey()), budget: ownDailyBudget(), usedToday: ownUsed, date: todayWIB } });
 });
 
 app.use("/api/apps/jobs", jobs);

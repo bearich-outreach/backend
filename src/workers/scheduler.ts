@@ -23,4 +23,12 @@ export function startScheduler() {
       ensureJobBuffer().catch(() => {});
     });
   }
+  // OpenWebNinja (global remote): 1 target/hari, quota guard di worker.
+  // 00:00 UTC = 07:00 WIB. Tanpa key -> worker skip diam-diam.
+  if (String(process.env.OWN_CRON_ENABLED ?? "true").toLowerCase() !== "false") {
+    cron.schedule("0 0 * * *", async () => {
+      const { ensureOwnDaily } = await import("./ownWorker");
+      ensureOwnDaily().catch(() => {});
+    });
+  }
 }
