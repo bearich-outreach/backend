@@ -104,6 +104,31 @@ export function mapOwnJob(j: OwnJob): ScrapedJob | null {
   };
 }
 
+/** Ambil array lowongan dari berbagai bentuk respons API (tahan variasi). */
+export function extractJobList(body: unknown): OwnJob[] {
+  if (Array.isArray(body)) return body as OwnJob[];
+  if (!body || typeof body !== "object") return [];
+  const o = body as Record<string, unknown>;
+  // Bentuk nyata API: { status, request_id, parameters, data: { jobs: [...] } }
+  if (o.data && typeof o.data === "object" && !Array.isArray(o.data)) {
+    const inner = o.data as Record<string, unknown>;
+    if (Array.isArray(inner.jobs)) return inner.jobs as OwnJob[];
+    if (Array.isArray(inner.data)) return inner.data as OwnJob[];
+    if (Array.isArray(inner.results)) return inner.results as OwnJob[];
+  }
+  if (Array.isArray(o.data)) return o.data as OwnJob[];
+  if (Array.isArray(o.jobs)) return o.jobs as OwnJob[];
+  if (Array.isArray(o.results)) return o.results as OwnJob[];
+  // Fallback terakhir: array pertama 1 level ke dalam yang anggotanya mirip job.
+  for (const v of Object.values(o)) {
+    if (Array.isArray(v) && v.length > 0 && typeof v[0] === "object" && v[0] !== null) {
+      const first = v[0] as Record<string, unknown>;
+      if ("job_id" in first || "job_title" in first) return v as OwnJob[];
+    }
+  }
+  return [];
+}
+
 export interface OwnSearchResult {
   jobs: ScrapedJob[];
   rawCount: number;
@@ -138,20 +163,18 @@ export async function searchOwnJobs(query: string): Promise<OwnSearchResult> {
       const body = await res.text().catch(() => "");
       throw new Error(`openwebninja: HTTP ${res.status} ${body.slice(0, 200)}`);
     }
-    const data = (await res.json()) as { data?: OwnJob[]; jobs?: OwnJob[] } | OwnJob[];
-    const list: OwnJob[] = Array.isArray(data)
-      ? data
-      : Array.isArray(data.data)
-        ? data.data
-        : Array.isArray(data.jobs)
-          ? data.jobs
-          : [];
+    const data = (await res.json()) as unknown;
+    const list = extractJobList(data);
+    console.log(`[own] query="${query}" raw=${list.length}`);
     const jobs: ScrapedJob[] = [];
     for (const j of list) {
       // Cap per query agar 1 request tidak membanjiri buffer.
       if (jobs.length >= 15) break;
       const m = mapOwnJob(j);
       if (m && m.url) jobs.push(m);
+    }
+    if (list.length > 0 && jobs.length === 0) {
+      console.log(`[own] query="${query}" peringatan: ${list.length} hasil tapi 0 ter-mapping (cek judul/url kosong)`);
     }
     return { jobs, rawCount: list.length };
   } catch (e) {
