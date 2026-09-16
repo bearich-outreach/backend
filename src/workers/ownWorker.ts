@@ -97,6 +97,7 @@ export async function processNextOwnTarget(): Promise<OwnRunResult> {
     return { keyword: target.keyword, rawCount: jobs.length, listingCount: listings, skippedNonRemote, usedToday: used + 1, budget, recycled };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[own] gagal keyword="${target.keyword}" err=${msg.slice(0, 300)}`);
     const quota = /429|rate limit|kuota/i.test(msg);
     await updateJobTarget(target.id, { status: "FAILED", lastError: msg.slice(0, 500) });
     return { keyword: target.keyword, quotaExceeded: quota || undefined, usedToday: used, budget };

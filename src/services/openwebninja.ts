@@ -4,6 +4,7 @@
 // Tanpa API key -> throw error jelas (worker menangkap -> FAILED, bukan crash).
 
 import type { ScrapedJob, WorkArrangement } from "./jobScrape";
+import crypto from "crypto";
 
 interface OwnHighlight {
   Qualifications?: string[];
@@ -87,11 +88,16 @@ export function mapOwnJob(j: OwnJob): ScrapedJob | null {
   const id = String(j.job_id ?? "").trim();
   const title = String(j.job_title ?? "").trim();
   if (!id || !title) return null;
+  // job_id API bisa 400+ char (> VARCHAR(255)) -> hash deterministik.
+  // Deterministik = job yang sama di-scrape ulang menghasilkan ID sama
+  // (idempoten via ON DUPLICATE KEY UPDATE, bukan duplikat). Potong/slice
+  // tidak dipakai karena berisiko tabrakan antar job berbeda.
+  const extId = `own-h-${crypto.createHash("md5").update(id).digest("hex").slice(0, 16)}`;
   const location =
     String(j.job_location ?? "").trim() ||
     [j.job_city, j.job_country].filter(Boolean).join(", ");
   return {
-    externalId: `own-${id}`,
+    externalId: extId,
     title: title.slice(0, 255),
     company: String(j.employer_name ?? "").trim().slice(0, 255) || "Unknown",
     location: location.slice(0, 255),
