@@ -265,3 +265,18 @@ CREATE TABLE IF NOT EXISTS job_listings (
   INDEX idx_score (score),
   INDEX idx_posted (posted_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Riwayat skill permanen (Opsi B): append-only, tahan hapus lowongan.
+-- Tanpa FK ke job_listings agar hide/DELETE permanen tidak menghapus vote.
+CREATE TABLE IF NOT EXISTS job_skill_sightings (
+  id VARCHAR(40) PRIMARY KEY,
+  listing_id VARCHAR(40) NOT NULL,
+  source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints',
+  external_id VARCHAR(255) NOT NULL DEFAULT '',
+  skill VARCHAR(100) NOT NULL,
+  skill_group VARCHAR(50) NOT NULL DEFAULT 'Lainnya',
+  seen_at DATETIME(3) NOT NULL,
+  UNIQUE KEY uq_source_ext_skill (source, external_id, skill),
+  INDEX idx_skill_seen (skill, seen_at),
+  INDEX idx_source_seen (source, seen_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -89,13 +89,21 @@ function normalize(text: string): string {
 
 /** Ekstrak daftar skill unik dari satu lowongan (1 listing = 1 vote per skill). */
 export function extractSkills(title: string, description?: string): string[] {
+  return extractSkillsWithGroups(title, description).map((s) => s.skill);
+}
+
+/** Varian dengan grup — dipakai pencatatan riwayat permanen (Opsi B). */
+export function extractSkillsWithGroups(
+  title: string,
+  description?: string
+): { skill: string; group: SkillGroup }[] {
   const text = normalize(`${title ?? ""}\n${description ?? ""}`);
   if (!text.trim()) return [];
-  const out: string[] = [];
+  const out: { skill: string; group: SkillGroup }[] = [];
   for (const def of SKILL_TAXONOMY) {
-    if (def.patterns.some((re) => re.test(text))) out.push(def.label);
+    if (def.patterns.some((re) => re.test(text))) out.push({ skill: def.label, group: def.group });
   }
-  return [...new Set(out)];
+  return [...new Map(out.map((s) => [s.skill, s])).values()];
 }
 
 export interface RankInput {

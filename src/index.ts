@@ -556,12 +556,18 @@ jobs.get("/raw", async (req, res) => {
   res.json({ raw, page, pageSize: PAGE_SIZE, total });
 });
 
-// Top Skill Requirement: agregasi document-frequency dari title + description_snippet.
-// Satu listing = satu vote per skill. Cache 5 menit (data scrape per 15 menit).
+// Top Skill Requirement: dua mode.
+// - mode=history (default): agregasi dari job_skill_sightings yang append-only,
+//   tetap tercatat walau lowongan dihapus/disampah (tujuan: bahan belajar).
+// - mode=active: perilaku lama, agregasi live dari title + description_snippet
+//   lowongan aktif (hidden=0). Satu listing = satu vote per skill.
+// Cache 5 menit (data scrape per 15 menit).
 let skillsCache: { at: number; key: string; data: unknown } | null = null;
 jobs.get("/skills", async (req, res) => {
-  const { getJobListingsForSkills } = await import("./db");
+  const { getJobListingsForSkills, getSkillHistory } = await import("./db");
   const { rankSkills } = await import("./services/jobSkills");
+  const modeRaw = String(req.query.mode ?? "history").toLowerCase();
+  const mode = modeRaw === "active" ? "active" : "history";
   const status = typeof req.query.status === "string" && req.query.status ? req.query.status : undefined;
   const source = typeof req.query.source === "string" && req.query.source ? req.query.source : undefined;
   const scope = typeof req.query.scope === "string" ? req.query.scope : undefined;
@@ -575,13 +581,20 @@ jobs.get("/skills", async (req, res) => {
     : scope === "global"
       ? ["openwebninja"]
       : undefined;
-  const key = JSON.stringify({ status, source, scope, days, limit });
+  const key = JSON.stringify({ mode, status, source, scope, days, limit });
   if (skillsCache && skillsCache.key === key && Date.now() - skillsCache.at < 5 * 60 * 1000) {
     return res.json(skillsCache.data);
   }
+  if (mode === "history") {
+    // Riwayat permanen: abaikan status/hidden (tak tersimpan di riwayat).
+    const { total, skills } = await getSkillHistory({ source, sources, days, limit });
+    const data = { total, skills, mode, filters: { status: null, source: source ?? null, scope: scope ?? "all", days: days ?? null, limit } };
+    skillsCache = { at: Date.now(), key, data };
+    return res.json(data);
+  }
   const listings = await getJobListingsForSkills({ status, source, sources, days });
   const { total, skills } = rankSkills(listings, { limit });
-  const data = { total, skills, filters: { status: status ?? null, source: source ?? null, scope: scope ?? "all", days: days ?? null, limit } };
+  const data = { total, skills, mode, filters: { status: status ?? null, source: source ?? null, scope: scope ?? "all", days: days ?? null, limit } };
   skillsCache = { at: Date.now(), key, data };
   res.json(data);
 });

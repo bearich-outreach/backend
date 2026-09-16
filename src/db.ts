@@ -642,6 +642,28 @@ export async function ensureSchema(): Promise<void> {
         count INT NOT NULL DEFAULT 0
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+    // Riwayat skill permanen (Opsi B): append-only, tahan hapus lowongan.
+    // Sengaja TANPA foreign key ke job_listings agar hide/DELETE permanen
+    // tidak ikut menghapus vote skill (1 listing = 1 vote per skill).
+    // Unik per (source, external_id, skill) agar re-scrape listing yang sama
+    // (upsert memakai id acak baru) tidak double-count.
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS job_skill_sightings (
+        id VARCHAR(40) PRIMARY KEY,
+        listing_id VARCHAR(40) NOT NULL,
+        source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints',
+        external_id VARCHAR(255) NOT NULL DEFAULT '',
+        skill VARCHAR(100) NOT NULL,
+        skill_group VARCHAR(50) NOT NULL DEFAULT 'Lainnya',
+        seen_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uq_source_ext_skill (source, external_id, skill),
+        INDEX idx_skill_seen (skill, seen_at),
+        INDEX idx_source_seen (source, seen_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+    // Migrasi dari versi awal Opsi B yang memakai UNIQUE(listing_id, skill).
+    try { await conn.query("ALTER TABLE job_skill_sightings DROP INDEX uq_listing_skill"); } catch { /* sudah migrasi / tabel baru */ }
+    try { await conn.query("ALTER TABLE job_skill_sightings ADD UNIQUE KEY uq_source_ext_skill (source, external_id, skill)"); } catch { /* sudah ada */ }
   } finally {
     conn.release();
   }
@@ -2644,6 +2666,109 @@ export async function getJobListingsForSkills(opts: { status?: string; source?: 
         params
       );
       return rows.map((r) => ({ title: String(r.title ?? "") }));
+    }
+  } finally { conn.release(); }
+}
+
+/* ---------- Riwayat skill permanen (Opsi B, tahan hapus lowongan) ---------- */
+
+export interface SkillSightingsInput {
+  listingId: string;
+  source: string;
+  externalId?: string;
+  skills: { skill: string; group: string }[];
+  seenAt?: string;
+}
+
+/** Catat vote skill 1x per listing (INSERT IGNORE anti-ganda). Return jumlah baris baru. */
+export async function recordSkillSightings(input: SkillSightingsInput): Promise<number> {
+  if (!input.listingId || !input.skills.length) return 0;
+  const conn = await getConn();
+  try {
+    const seenAt = toMysql(input.seenAt) ?? toMysql(todayISO());
+    let inserted = 0;
+    for (const s of input.skills) {
+      const skill = String(s.skill ?? "").slice(0, 100).trim();
+      if (!skill) continue;
+      const group = String(s.group ?? "Lainnya").slice(0, 50) || "Lainnya";
+      const [r] = await conn.query<ResultSetHeader>(
+        "INSERT IGNORE INTO job_skill_sightings (id, listing_id, source, external_id, skill, skill_group, seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [uid("jss_"), input.listingId, input.source, String(input.externalId ?? "").slice(0, 255), skill, group, seenAt]
+      );
+      inserted += r.affectedRows ?? 0;
+    }
+    return inserted;
+  } finally { conn.release(); }
+}
+
+export interface SkillHistoryRow {
+  skill: string;
+  group: string;
+  count: number;
+  pct: number;
+}
+
+/** Agregasi dari tabel riwayat (tidak terpengaruh hide/DELETE listings). */
+export async function getSkillHistory(opts: { source?: string; sources?: string[]; days?: number; limit?: number } = {}): Promise<{ total: number; skills: SkillHistoryRow[] }> {
+  const conn = await getConn();
+  try {
+    const where: string[] = []; const params: unknown[] = [];
+    if (opts.source) { where.push("source = ?"); params.push(opts.source); }
+    if (opts.sources?.length) { where.push(`source IN (${opts.sources.map(() => "?").join(",")})`); params.push(...opts.sources); }
+    const days = Math.floor(Number(opts.days) || 0);
+    if (days > 0) { where.push("seen_at >= DATE_SUB(NOW(3), INTERVAL ? DAY)"); params.push(days); }
+    const suffix = where.length ? " WHERE " + where.join(" AND ") : "";
+    const [t] = await conn.query<RowDataPacket[]>(
+      "SELECT COUNT(DISTINCT listing_id) total FROM job_skill_sightings" + suffix, params
+    );
+    const total = Number(t[0]?.total ?? 0);
+    const limit = Math.min(Math.max(Math.floor(Number(opts.limit) || 20), 1), 100);
+    const [rows] = await conn.query<RowDataPacket[]>(
+      "SELECT skill, skill_group, COUNT(DISTINCT listing_id) cnt FROM job_skill_sightings" + suffix + " GROUP BY skill, skill_group ORDER BY cnt DESC, skill ASC LIMIT " + limit,
+      params
+    );
+    const skills: SkillHistoryRow[] = rows.map((r) => ({
+      skill: String(r.skill ?? ""),
+      group: String(r.skill_group ?? "Lainnya"),
+      count: Number(r.cnt ?? 0),
+      pct: total > 0 ? Math.round((Number(r.cnt ?? 0) / total) * 1000) / 10 : 0,
+    }));
+    return { total, skills };
+  } finally { conn.release(); }
+}
+
+export interface BackfillListing {
+  id: string;
+  source: string;
+  externalId: string;
+  title: string;
+  description?: string;
+  seenAt?: string;
+}
+
+/** Ambil semua listings (termasuk hidden) untuk backfill riwayat, batch 500. */
+export async function getJobListingsForBackfill(batch: number, offset: number): Promise<BackfillListing[]> {
+  const conn = await getConn();
+  try {
+    const lim = Math.min(Math.max(Math.floor(batch) || 500, 1), 1000);
+    const off = Math.max(Math.floor(offset) || 0, 0);
+    try {
+      const [rows] = await conn.query<RowDataPacket[]>(
+        "SELECT id, source, external_id, title, description_snippet, first_seen_at FROM job_listings ORDER BY first_seen_at ASC LIMIT " + lim + " OFFSET " + off
+      );
+      return rows.map((r) => ({
+        id: String(r.id), source: String(r.source ?? "glints"), externalId: String(r.external_id ?? ""),
+        title: String(r.title ?? ""), description: r.description_snippet ? String(r.description_snippet) : undefined,
+        seenAt: fromMysql(r.first_seen_at ?? undefined),
+      }));
+    } catch {
+      const [rows] = await conn.query<RowDataPacket[]>(
+        "SELECT id, source, external_id, title, first_seen_at FROM job_listings ORDER BY first_seen_at ASC LIMIT " + lim + " OFFSET " + off
+      );
+      return rows.map((r) => ({
+        id: String(r.id), source: String(r.source ?? "glints"), externalId: String(r.external_id ?? ""),
+        title: String(r.title ?? ""), seenAt: fromMysql(r.first_seen_at ?? undefined),
+      }));
     }
   } finally { conn.release(); }
 }

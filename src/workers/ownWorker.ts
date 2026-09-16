@@ -7,12 +7,14 @@ import {
   upsertJobListing,
   findJobListingFuzzy,
   normalizeJobUrl,
+  recordSkillSightings,
   ownDailyBudget,
   getOwnDailyCount,
   incrOwnDailyCount,
 } from "../db";
 import { searchOwnJobs, ownApiKey } from "../services/openwebninja";
 import { scoreJob, detectRemoteLabel } from "../services/jobScoring";
+import { extractSkillsWithGroups } from "../services/jobSkills";
 import { uid, todayISO } from "../store";
 
 function hash(s: string) { return crypto.createHash("md5").update(s).digest("hex").slice(0, 16); }
@@ -83,14 +85,22 @@ export async function processNextOwnTarget(): Promise<OwnRunResult> {
       const dup = s.company ? await findJobListingFuzzy(s.title, s.company) : undefined;
       if (dup) continue;
       const score = scoreJob({ title: s.title, description: s.description, postedDate: s.postedDate });
+      const listingId = uid("jl_");
       await upsertJobListing({
-        id: uid("jl_"), source: target.source, externalId: extId,
+        id: listingId, source: target.source, externalId: extId,
         title: s.title || target.keyword, company: s.company || "Unknown",
         location, url: normUrl, clickUrl: s.url, salaryText: s.salaryText,
         descriptionSnippet: (s.description ?? "").slice(0, 2000) || undefined,
         remoteLabel: label, reviewFlag, score, status: "New",
         hidden: false, postedDate: s.postedDate, firstSeenAt: now, lastSeenAt: now, createdAt: now,
       });
+      // Riwayat skill permanen: tetap tercatat walau lowongan kelak dihapus.
+      try {
+        const found = extractSkillsWithGroups(s.title || target.keyword, s.description);
+        if (found.length) {
+          await recordSkillSightings({ listingId, source: target.source, externalId: extId, skills: found, seenAt: now });
+        }
+      } catch { /* riwayat gagal tidak boleh menggagalkan scrape */ }
       listings++;
     }
     await updateJobTarget(target.id, { status: "DONE" });

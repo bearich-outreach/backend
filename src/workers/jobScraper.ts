@@ -1,10 +1,11 @@
 import crypto from "crypto";
 import {
   claimNextJobTarget, claimRecycledJobTarget, peekNextJobTarget, updateJobTarget, upsertJobRaw, upsertJobListing,
-  findJobListingFuzzy, getJobListings, normalizeJobUrl,
+  findJobListingFuzzy, getJobListings, normalizeJobUrl, recordSkillSightings,
 } from "../db";
 import { scrapeJobs } from "../services/jobScrape";
 import { scoreJob, detectRemoteLabel } from "../services/jobScoring";
+import { extractSkillsWithGroups } from "../services/jobSkills";
 import type { JobSource } from "../types";
 import { uid, todayISO } from "../store";
 
@@ -76,14 +77,22 @@ export async function processNextJobTarget(): Promise<{ keyword?: string; source
       const dup = s.company ? await findJobListingFuzzy(s.title, s.company) : undefined;
       if (dup) continue; // sudah ada 30 hari terakhir -> skip insert listing ganda
       const score = scoreJob({ title: s.title, description: s.description, postedDate: s.postedDate });
+      const listingId = uid("jl_");
       await upsertJobListing({
-        id: uid("jl_"), source: target.source, externalId: extId,
+        id: listingId, source: target.source, externalId: extId,
         title: s.title || target.keyword, company: s.company || "Unknown",
         location, url: normUrl, clickUrl: s.url, salaryText: s.salaryText,
         descriptionSnippet: (s.description ?? "").slice(0, 2000) || undefined,
         remoteLabel: label, reviewFlag, score, status: "New",
         hidden: false, postedDate: s.postedDate, firstSeenAt: now, lastSeenAt: now, createdAt: now,
       });
+      // Riwayat skill permanen: tetap tercatat walau lowongan kelak dihapus.
+      try {
+        const found = extractSkillsWithGroups(s.title || target.keyword, s.description);
+        if (found.length) {
+          await recordSkillSightings({ listingId, source: target.source, externalId: extId, skills: found, seenAt: now });
+        }
+      } catch { /* riwayat gagal tidak boleh menggagalkan scrape */ }
       listings++;
     }
     await updateJobTarget(target.id, { status: "DONE" });
