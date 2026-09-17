@@ -569,7 +569,7 @@ export async function ensureSchema(): Promise<void> {
       CREATE TABLE IF NOT EXISTS job_targets (
         id VARCHAR(40) PRIMARY KEY,
         keyword VARCHAR(255) NOT NULL,
-        source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints',
+        source ENUM('glints','jobstreet','indeed','openwebninja','dealls') NOT NULL DEFAULT 'glints',
         status ENUM('PENDING','PROCESSING','DONE','FAILED') NOT NULL DEFAULT 'PENDING',
         attempts INT NOT NULL DEFAULT 0,
         last_error TEXT,
@@ -582,7 +582,7 @@ export async function ensureSchema(): Promise<void> {
     await conn.query(`
       CREATE TABLE IF NOT EXISTS job_raw (
         id VARCHAR(40) PRIMARY KEY,
-        source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints',
+        source ENUM('glints','jobstreet','indeed','openwebninja','dealls') NOT NULL DEFAULT 'glints',
         external_id VARCHAR(255) NOT NULL,
         title VARCHAR(255) NOT NULL DEFAULT '',
         company VARCHAR(255) NOT NULL DEFAULT '',
@@ -602,7 +602,7 @@ export async function ensureSchema(): Promise<void> {
     await conn.query(`
       CREATE TABLE IF NOT EXISTS job_listings (
         id VARCHAR(40) PRIMARY KEY,
-        source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints',
+        source ENUM('glints','jobstreet','indeed','openwebninja','dealls') NOT NULL DEFAULT 'glints',
         external_id VARCHAR(255) NOT NULL,
         title VARCHAR(255) NOT NULL DEFAULT '',
         company VARCHAR(255) NOT NULL DEFAULT '',
@@ -626,10 +626,10 @@ export async function ensureSchema(): Promise<void> {
         INDEX idx_posted (posted_date)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
-    // Migrasi Indeed untuk tabel lama di production (tanpa hapus data)
-    try { await conn.query("ALTER TABLE job_targets MODIFY source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints'"); } catch { /* sudah terbaru */ }
-    try { await conn.query("ALTER TABLE job_raw MODIFY source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints'"); } catch { /* sudah terbaru */ }
-    try { await conn.query("ALTER TABLE job_listings MODIFY source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints'"); } catch { /* sudah terbaru */ }
+    // Migrasi source baru untuk tabel lama di production (tanpa hapus data)
+    try { await conn.query("ALTER TABLE job_targets MODIFY source ENUM('glints','jobstreet','indeed','openwebninja','dealls') NOT NULL DEFAULT 'glints'"); } catch { /* sudah terbaru */ }
+    try { await conn.query("ALTER TABLE job_raw MODIFY source ENUM('glints','jobstreet','indeed','openwebninja','dealls') NOT NULL DEFAULT 'glints'"); } catch { /* sudah terbaru */ }
+    try { await conn.query("ALTER TABLE job_listings MODIFY source ENUM('glints','jobstreet','indeed','openwebninja','dealls') NOT NULL DEFAULT 'glints'"); } catch { /* sudah terbaru */ }
     // Opsi B: kolom audit URL asli (nullable, additive — Glints/JobStreet tidak terpengaruh)
     try { await conn.query("ALTER TABLE job_raw ADD COLUMN click_url VARCHAR(1000) NULL AFTER url"); } catch { /* kolom sudah ada */ }
     try { await conn.query("ALTER TABLE job_listings ADD COLUMN click_url VARCHAR(1000) NULL AFTER url"); } catch { /* kolom sudah ada */ }
@@ -651,7 +651,7 @@ export async function ensureSchema(): Promise<void> {
       CREATE TABLE IF NOT EXISTS job_skill_sightings (
         id VARCHAR(40) PRIMARY KEY,
         listing_id VARCHAR(40) NOT NULL,
-        source ENUM('glints','jobstreet','indeed','openwebninja') NOT NULL DEFAULT 'glints',
+        source ENUM('glints','jobstreet','indeed','openwebninja','dealls') NOT NULL DEFAULT 'glints',
         external_id VARCHAR(255) NOT NULL DEFAULT '',
         skill VARCHAR(100) NOT NULL,
         skill_group VARCHAR(50) NOT NULL DEFAULT 'Lainnya',
@@ -2418,8 +2418,8 @@ export function normalizeJobUrl(u: string, source?: string): string {
       url.hostname = hostLower;
       return url.toString().replace(/\/+$/, "");
     }
-    // Glints/JobStreet: perilaku lama persis (ID ada di path).
-    if (source === "glints" || source === "jobstreet" || /(^|\.)glints\.com$/.test(hostLower) || /(^|\.)jobstreet\.(com|co\.id)$/.test(hostLower)) {
+    // Glints/JobStreet/Dealls: perilaku lama persis (ID ada di path).
+    if (source === "glints" || source === "jobstreet" || source === "dealls" || /(^|\.)glints\.com$/.test(hostLower) || /(^|\.)jobstreet\.(com|co\.id)$/.test(hostLower) || /(^|\.)dealls\.com$/.test(hostLower)) {
       url.search = ""; url.hash = "";
       return url.toString().toLowerCase().replace(/\/+$/, "");
     }
@@ -2560,7 +2560,7 @@ export async function countJobListings() {
     return { total, byStatus, hidden: Number(h[0]?.total ?? 0) };
   } finally { conn.release(); }
 }
-/** Hitung per-scope section: id (glints/jobstreet/indeed) vs global (openwebninja). */
+/** Hitung per-scope section: id (glints/jobstreet/indeed/dealls) vs global (openwebninja). */
 export async function countJobListingsByScope() {
   const conn = await getConn();
   try {

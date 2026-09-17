@@ -466,9 +466,9 @@ jobs.get("/listings", async (req, res) => {
   const { getJobListings, countJobListingsFiltered } = await import("./db");
   const status = typeof req.query.status === "string" && req.query.status ? req.query.status : undefined;
   const source = typeof req.query.source === "string" && req.query.source ? req.query.source : undefined;
-  // scope=id: kunci ke section Lowongan (glints/jobstreet/indeed), tanpa openwebninja.
+  // scope=id: kunci ke section Lowongan (glints/jobstreet/indeed/dealls), tanpa openwebninja.
   const scope = typeof req.query.scope === "string" ? req.query.scope : undefined;
-  const sources = scope === "id" && !source ? ["glints", "jobstreet", "indeed"] : undefined;
+  const sources = scope === "id" && !source ? ["glints", "jobstreet", "indeed", "dealls"] : undefined;
   const trash = String(req.query.hidden ?? "") === "trash";
   const page = parsePage(req.query.page);
   const [listings, total] = await Promise.all([
@@ -528,7 +528,7 @@ jobs.delete("/listings", h(async (req, res) => {
   const source = typeof req.query.source === "string" && req.query.source ? req.query.source : undefined;
   const scope = typeof req.query.scope === "string" ? req.query.scope : undefined;
   if (source) { res.json(await deleteTrashJobListings(source)); return; }
-  if (scope === "id") { res.json(await deleteTrashJobListings(undefined, ["glints", "jobstreet", "indeed"])); return; }
+  if (scope === "id") { res.json(await deleteTrashJobListings(undefined, ["glints", "jobstreet", "indeed", "dealls"])); return; }
   res.json(await deleteTrashJobListings());
 }));
 
@@ -575,9 +575,9 @@ jobs.get("/skills", async (req, res) => {
   const days = Number.isFinite(daysRaw) && daysRaw > 0 ? Math.min(Math.floor(daysRaw), 365) : undefined;
   const limitRaw = Number(req.query.limit);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), 100) : 20;
-  // scope: id (glints/jobstreet/indeed) | global (openwebninja) | all (default).
+  // scope: id (glints/jobstreet/indeed/dealls) | global (openwebninja) | all (default).
   const sources = scope === "id"
-    ? ["glints", "jobstreet", "indeed"]
+    ? ["glints", "jobstreet", "indeed", "dealls"]
     : scope === "global"
       ? ["openwebninja"]
       : undefined;
@@ -630,7 +630,7 @@ jobs.get("/scheduler/status", async (_req, res) => {
   const { ownApiKey } = await import("./services/openwebninja");
   const todayWIB = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" })).toISOString().slice(0, 10);
   const ownUsed = await getOwnDailyCount(todayWIB);
-  res.json({ cron: process.env.JOBS_CRON_ENABLED ?? "true", interval: "*/15 * * * *", maxPerDay: 10, perKeyword: 15, pool: 63, recycleHours: jobRecycleHours(), strictSources: ["jobstreet", "indeed"], own: { enabled: process.env.OWN_CRON_ENABLED ?? "true", schedule: "0 0 * * * (00:00 UTC = 07:00 WIB)", keyConfigured: Boolean(ownApiKey()), budget: ownDailyBudget(), usedToday: ownUsed, date: todayWIB } });
+  res.json({ cron: process.env.JOBS_CRON_ENABLED ?? "true", interval: "*/15 * * * *", maxPerDay: 10, perKeyword: 15, pool: 68, recycleHours: jobRecycleHours(), strictSources: ["jobstreet", "indeed"], own: { enabled: process.env.OWN_CRON_ENABLED ?? "true", schedule: "0 0 * * * (00:00 UTC = 07:00 WIB)", keyConfigured: Boolean(ownApiKey()), budget: ownDailyBudget(), usedToday: ownUsed, date: todayWIB } });
 });
 
 app.use("/api/apps/jobs", jobs);

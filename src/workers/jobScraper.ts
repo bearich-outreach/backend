@@ -27,7 +27,7 @@ function isStrictThrottled(source: JobSource): boolean {
 }
 
 export async function processNextJobTarget(): Promise<{ keyword?: string; source?: string; rawCount?: number; listingCount?: number; skippedNonRemote?: number; throttled?: boolean; captcha?: boolean; recycled?: boolean; noEligible?: boolean }> {
-  // Kolam 63 terus berputar: PENDING dulu, bila kosong putar ulang DONE
+  // Kolam 68 terus berputar: PENDING dulu, bila kosong putar ulang DONE
   // paling lama yang sudah >= cooldown (default 24 jam). FAILED tidak ikut —
   // tetap manual via Retry agar tidak menghajar situs pemblokir.
   // Target openwebninja dikecualikan di sini (dikerjakan worker API harian).

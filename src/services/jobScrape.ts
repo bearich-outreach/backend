@@ -1,4 +1,4 @@
-// Scraper Glints + JobStreet + Indeed (tanpa login, publik saja).
+// Scraper Glints + JobStreet + Indeed + Dealls (tanpa login, publik saja).
 // Pola sama seperti outreach mapsScrape: Playwright bila USE_PLAYWRIGHT=true,
 // else mock agar dev lokal tidak block. Throttle 2-5s, max 15/keyword.
 
@@ -50,7 +50,9 @@ function mockJobs(keyword: string, source: JobSource): ScrapedJob[] {
       ? `https://glints.com/id/opportunities/jobs/mock-${i}`
       : source === "jobstreet"
         ? `https://id.jobstreet.com/job/mock-${i}`
-        : `https://id.indeed.com/viewjob?jk=mock${i}abcdef1234`,
+        : source === "dealls"
+          ? `https://dealls.com/loker/mock-job-${i}~pt-contoh`
+          : `https://id.indeed.com/viewjob?jk=mock${i}abcdef1234`,
     salaryText: "",
     description: `[MOCK — link tidak valid, hanya untuk dev lokal] ${keyword} remote, WFH. Cocok untuk junior/intern.`,
     postedDate: new Date(now.getTime() - i * 2 * 86400000).toISOString(),
@@ -128,7 +130,10 @@ async function scrapeViaPlaywright(keyword: string, source: JobSource): Promise<
     const glintsFiltered = `${glintsBase}&filter=remote`;
     const jobstreetUrl = `https://id.jobstreet.com/id/${encodeURIComponent(keyword.replace(/\s+/g, "-").toLowerCase())}-jobs?where=Remote&sortmode=ListedDate`;
     const indeedUrl = `https://id.indeed.com/jobs?q=${kwPlus}&l=Remote&sort=date&fromage=14`;
-    const urlCandidates = source === "glints" ? [glintsFiltered, glintsBase] : source === "jobstreet" ? [jobstreetUrl] : [indeedUrl];
+    // Dealls: search per keyword, SSR (200 OK terverifikasi), badge Remote di kartu.
+    // Tanpa slug-map: /loker?q= berlaku untuk semua keyword.
+    const deallsUrl = `https://dealls.com/loker?q=${kwPlus}`;
+    const urlCandidates = source === "glints" ? [glintsFiltered, glintsBase] : source === "jobstreet" ? [jobstreetUrl] : source === "dealls" ? [deallsUrl] : [indeedUrl];
     let urlUsed = urlCandidates[0];
     let html = "";
     let links: { href: string; text: string; aria: string; card: string }[] = [];
@@ -137,7 +142,9 @@ async function scrapeViaPlaywright(keyword: string, source: JobSource): Promise<
       ? "a[href*='/opportunities/jobs/']"
       : source === "jobstreet"
         ? "a[href*='/job/']"
-        : "a.jcs-JobTitle, a[href*='/pagead/'], a[href*='/rc/clk']";
+        : source === "dealls"
+          ? "a[href*='/loker/']"
+          : "a.jcs-JobTitle, a[href*='/pagead/'], a[href*='/rc/clk']";
     for (const candidate of urlCandidates) {
       urlUsed = candidate;
       await page.goto(candidate, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -197,11 +204,19 @@ async function scrapeViaPlaywright(keyword: string, source: JobSource): Promise<
     let cardRemote = 0, cardHybrid = 0, cardOnsite = 0, cardUnknown = 0;
     for (const l of links) {
       if (!l.href || seen.has(l.href)) continue;
-      // Hanya URL detail (ada UUID / id numerik / jk Indeed), bukan halaman explore/filter.
-      const uuid = l.href.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1]
-        ?? l.href.match(/[?&]jk=([a-z0-9]{10,})/i)?.[1]
-        ?? l.href.match(/([0-9]{6,})/)?.[1];
-      if (!uuid) continue;
+      // Hanya URL detail (ada UUID / id numerik / jk Indeed / slug Dealls), bukan halaman explore/filter.
+      // Dealls: detail = /loker/{slug}~{company} (ada "~"); nav /loker/populer dsb tanpa "~" otomatis kesaring.
+      let uuid: string | undefined;
+      if (source === "dealls") {
+        const slug = l.href.match(/\/loker\/([^/?#]+)/i)?.[1];
+        if (!slug || !slug.includes("~")) continue;
+        uuid = slug;
+      } else {
+        uuid = l.href.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1]
+          ?? l.href.match(/[?&]jk=([a-z0-9]{10,})/i)?.[1]
+          ?? l.href.match(/([0-9]{6,})/)?.[1];
+        if (!uuid) continue;
+      }
       seen.add(l.href);
       // Company dari baris kartu (baris ke-2 yang bukan judul, max 80 char).
       let company = "";

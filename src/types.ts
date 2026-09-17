@@ -257,7 +257,7 @@ export interface TaskStats {
 
 /* ---------- Jobs app (Glints + JobStreet, full remote, 1 akun pribadi) ---------- */
 
-export type JobSource = "glints" | "jobstreet" | "indeed" | "openwebninja";
+export type JobSource = "glints" | "jobstreet" | "indeed" | "openwebninja" | "dealls";
 export type JobTargetStatus = "PENDING" | "PROCESSING" | "DONE" | "FAILED";
 export type JobListingStatus = "New" | "Saved" | "Applied" | "Interview" | "Rejected";
 export type JobRemoteLabel = "Remote" | "Perlu Cek";

@@ -2,7 +2,7 @@ import { insertJobTarget, countJobTargets, getJobTargets } from "../db";
 import { uid, todayISO } from "../store";
 
 // 3 query global untuk trial OpenWebNinja (1 request API per keyword).
-// Terpisah dari 63 target Playwright; dikerjakan worker harian khusus (ownWorker).
+// Terpisah dari 68 target Playwright; dikerjakan worker harian khusus (ownWorker).
 export const OWN_QUERIES = [
   "remote frontend developer",
   "remote backend developer",

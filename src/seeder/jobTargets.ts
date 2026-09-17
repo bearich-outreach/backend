@@ -30,9 +30,19 @@ export const JOB_ROLES = [
 
 const SOURCES: JobSource[] = ["glints", "jobstreet", "indeed"];
 
+// Pilot Dealls: 5 role web saja (search /loker?q= per keyword, SSR, badge Remote eksplisit).
+// Naikkan ke JOB_ROLES penuh bila yield seminggu bagus.
+const DEALLS_PILOT_ROLES = [
+  "Frontend Developer",
+  "Backend Developer",
+  "Fullstack Developer",
+  "React Developer",
+  "PHP Laravel Developer",
+];
+
 export async function seedJobTargets(): Promise<{ inserted: number; total: number }> {
   // Tambah yang hilang saja (idempotent): 42 lama tidak disentuh updated_at-nya
-  // agar urutan putar ulang DONE tidak ke-reset. Total docita 21 x 3 = 63.
+  // agar urutan putar ulang DONE tidak ke-reset. Total: 21 x 3 = 63 + 5 pilot dealls = 68.
   const existing = await getJobTargets({ limit: 500 });
   const have = new Set(existing.map((t) => `${t.keyword}||${t.source}`));
   let inserted = 0;
@@ -51,6 +61,20 @@ export async function seedJobTargets(): Promise<{ inserted: number; total: numbe
       });
       inserted++;
     }
+  }
+  // Pilot Dealls: 5 target (idempotent, tidak sentuh 63 lama).
+  for (const role of DEALLS_PILOT_ROLES) {
+    if (have.has(`${role}||dealls`)) continue;
+    await insertJobTarget({
+      id: uid("jt_"),
+      keyword: role,
+      source: "dealls",
+      status: "PENDING",
+      attempts: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    inserted++;
   }
   const after = await countJobTargets();
   return { inserted, total: after.total };
