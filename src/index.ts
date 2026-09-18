@@ -478,6 +478,23 @@ jobs.get("/listings", async (req, res) => {
   res.json({ listings, page, pageSize: PAGE_SIZE, total });
 });
 
+jobs.get("/listings/:id/score", async (req, res) => {
+  // Jabaran skor ("Skor X datang dari mana?"): hitung ulang dari baris tersimpan.
+  // Catatan: memakai descriptionSnippet (≤2000 char, potongan depan), bukan deskripsi
+  // full saat scoring — bila kata penentu hanya muncul setelah char ke-2000 (sangat
+  // jarang), hasil bisa selisih 5–10 poin. Tanpa kolom baru, tanpa backfill.
+  const { getJobListing } = await import("./db");
+  const { scoreJobDetailed } = await import("./services/jobScoring");
+  const l = await getJobListing(req.params.id);
+  if (!l) return sendError(res, 404, "not found");
+  const { score, parts } = scoreJobDetailed({
+    title: l.title,
+    description: l.descriptionSnippet,
+    postedDate: l.postedDate,
+  });
+  res.json({ listingId: l.id, score, parts });
+});
+
 jobs.get("/listings/:id", async (req, res) => {
   const { getJobListing } = await import("./db");
   const l = await getJobListing(req.params.id);

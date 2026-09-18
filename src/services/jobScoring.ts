@@ -22,40 +22,69 @@ export interface JobScoreInput {
   postedDate?: string;
 }
 
-export function scoreJob(input: JobScoreInput): number {
+export interface ScorePart {
+  key: string;
+  label: string;
+  points: number;
+}
+
+export interface ScoreBreakdown {
+  score: number;
+  parts: ScorePart[];
+}
+
+export function scoreJobDetailed(input: JobScoreInput): ScoreBreakdown {
   const t = `${input.title} ${input.description ?? ""}`.toLowerCase();
-  let score = 0;
+  const parts: ScorePart[] = [];
 
   // +50 relevansi role
   const titleLow = input.title.toLowerCase();
-  if (ROLE_VARIANTS.some((v) => titleLow.includes(v))) score += 50;
-  else score += 15; // judul polos tetap dapat poin kecil
+  const roleHit = ROLE_VARIANTS.find((v) => titleLow.includes(v));
+  if (roleHit) {
+    parts.push({ key: "role", label: `Judul relevan (${roleHit})`, points: 50 });
+  } else {
+    parts.push({ key: "role", label: "Judul umum", points: 15 });
+  }
 
   // +30 freshness (posted date)
   if (input.postedDate) {
     const d = new Date(input.postedDate).getTime();
     if (!isNaN(d)) {
       const days = (Date.now() - d) / (1000 * 60 * 60 * 24);
-      if (days <= 3) score += 30;
-      else if (days <= 7) score += 20;
-      else if (days <= 14) score += 10;
+      if (days <= 3) parts.push({ key: "freshness", label: "Diposting ≤ 3 hari lalu", points: 30 });
+      else if (days <= 7) parts.push({ key: "freshness", label: "Diposting ≤ 7 hari lalu", points: 20 });
+      else if (days <= 14) parts.push({ key: "freshness", label: "Diposting ≤ 14 hari lalu", points: 10 });
+      else parts.push({ key: "freshness", label: "Diposting > 14 hari lalu", points: 0 });
+    } else {
+      parts.push({ key: "freshness", label: "Tanggal tak valid", points: 0 });
     }
   } else {
-    score += 5; // tanggal tak diketahui
+    parts.push({ key: "freshness", label: "Tanggal tak diketahui", points: 5 });
   }
 
   // +20 bonus deskripsi (gaji disclosed / remote keyword / verified)
-  if (/rp|idr|salary|gaji/i.test(t)) score += 5;
-  if (/remote|wfh|work from home|dari rumah/i.test(t)) score += 10;
-  if (/verified|actively hiring/i.test(t)) score += 5;
+  if (/rp|idr|salary|gaji/i.test(t)) parts.push({ key: "salary", label: "Gaji tercantum", points: 5 });
+  if (/remote|wfh|work from home|dari rumah/i.test(t)) parts.push({ key: "remote", label: "Keyword remote di deskripsi", points: 10 });
+  if (/verified|actively hiring/i.test(t)) parts.push({ key: "active", label: "Sinyal aktif", points: 5 });
 
   // bonus junior
-  if (JUNIOR_BONUS.some((k) => t.includes(k))) score += 10;
+  const juniorHit = JUNIOR_BONUS.find((k) => t.includes(k));
+  if (juniorHit) parts.push({ key: "junior", label: `Junior (${juniorHit})`, points: 10 });
 
   // penalti senior / mobile / desktop stack
-  if (NEGATIVE.some((k) => t.includes(k))) score -= 50;
+  const negHit = NEGATIVE.find((k) => t.includes(k));
+  if (negHit) parts.push({ key: "penalty", label: `Mengandung kata "${negHit}"`, points: -50 });
 
-  return Math.max(0, Math.min(100, score));
+  const raw = parts.reduce((s, p) => s + p.points, 0);
+  const score = Math.max(0, Math.min(100, raw));
+  if (score !== raw) {
+    parts.push({ key: "clamp", label: "Penyesuaian batas 0–100", points: score - raw });
+  }
+  return { score, parts };
+}
+
+export function scoreJob(input: JobScoreInput): number {
+  return scoreJobDetailed(input).score;
 }
 
 export type RemoteLabel = "Remote" | "Perlu Cek";
